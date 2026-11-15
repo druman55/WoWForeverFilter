@@ -1,0 +1,39 @@
+# Packaged releases (BigWigs packager / CurseForge / Wago output)
+.release/
+*.zip
+
+# Libraries fetched by the packager from .pkgmeta externals
+# (uncomment if you use .pkgmeta externals instead of committing libs)
+# Libs/
+
+# Saved variables / WTF copies should never be committed
+WTF/
+SavedVariables/
+*.lua.bak
+
+# Editor and IDE settings
+.vscode/
+.idea/
+*.code-workspace
+*.sublime-*
+
+# Lua language server cache
+.luarc.json.bak
+.luacheckcache
+
+# Temporary and backup files
+*.tmp
+*.bak
+*.swp
+*~
+
+# OS files
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Local secrets (e.g. packager API tokens)
+.env
+
+# Local tooling
+.kiro/

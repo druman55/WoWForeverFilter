@@ -1,0 +1,11 @@
+## Interface: 120105
+## Title: Forever Filter
+## Notes: Filter your Battle.net friends list by the game they are playing.
+## Author: druma
+## Version: 0.0.1
+## SavedVariables: ForeverFilterDB
+
+Core.lua
+Friends.lua
+Games.lua
+UI.lua
