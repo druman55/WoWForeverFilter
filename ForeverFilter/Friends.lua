@@ -36,6 +36,7 @@ local function makeOnlineEntry(name, gameInfo)
         wowProjectID = positiveNumber(gameInfo.wowProjectID),
         richPresence = nonEmpty(gameInfo.richPresence),
         characterName = nonEmpty(gameInfo.characterName),
+        subIcon = nonEmpty(gameInfo.subIcon),
     }
 end
 
@@ -89,6 +90,7 @@ function Friends.GetAll()
                     wowProjectID = nil,
                     richPresence = nil,
                     characterName = nil,
+                    subIcon = nil,
                 }
             end
         end
@@ -112,9 +114,10 @@ function Friends.CountByGame(entries)
 end
 
 -- Groups online entries by (game, wowProjectID). Returns a list of
--- { game, wowProjectID, count, friends } ordered by count descending, then by
+-- { game, wowProjectID, subIcon, count, friends } ordered by
 -- nameFn(game, wowProjectID) case-insensitively (or by game code when nameFn
--- is nil), then by game code, then by project ID (nil first).
+-- is nil), then by game code, then by project ID (nil first). Friend counts
+-- do not affect the order.
 function Friends.GroupByGame(entries, nameFn)
     local rows, byKey = {}, {}
 
@@ -128,9 +131,12 @@ function Friends.GroupByGame(entries, nameFn)
             local key = game .. ":" .. tostring(pid)
             local row = byKey[key]
             if not row then
-                row = { game = game, wowProjectID = pid, count = 0, friends = {}, seen = {} }
+                row = { game = game, wowProjectID = pid, subIcon = nil, count = 0, friends = {}, seen = {} }
                 byKey[key] = row
                 rows[#rows + 1] = row
+            end
+            if row.subIcon == nil and e.subIcon ~= nil then
+                row.subIcon = e.subIcon
             end
             local name = e.name or "?"
             if not row.seen[name] then
@@ -153,9 +159,6 @@ function Friends.GroupByGame(entries, nameFn)
     end
 
     table.sort(rows, function(a, b)
-        if a.count ~= b.count then
-            return a.count > b.count
-        end
         local na = nameFn and tostring(nameFn(a.game, a.wowProjectID)):lower() or a.game
         local nb = nameFn and tostring(nameFn(b.game, b.wowProjectID)):lower() or b.game
         if na ~= nb then
@@ -164,7 +167,17 @@ function Friends.GroupByGame(entries, nameFn)
         if a.game ~= b.game then
             return a.game < b.game
         end
-        return (a.wowProjectID or 0) < (b.wowProjectID or 0)
+        -- project ID, nil first
+        if a.wowProjectID == b.wowProjectID then
+            return false
+        end
+        if a.wowProjectID == nil then
+            return true
+        end
+        if b.wowProjectID == nil then
+            return false
+        end
+        return a.wowProjectID < b.wowProjectID
     end)
 
     return rows

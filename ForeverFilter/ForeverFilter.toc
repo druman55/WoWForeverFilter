@@ -2,7 +2,7 @@
 ## Title: Forever Filter
 ## Notes: Filter your Battle.net friends list by the game they are playing.
 ## Author: druma
-## Version: 0.0.1
+## Version: 0.1.0
 ## SavedVariables: ForeverFilterDB
 
 Core.lua

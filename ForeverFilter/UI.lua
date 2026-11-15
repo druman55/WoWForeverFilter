@@ -8,7 +8,16 @@ local LINE_HEIGHT = 16
 local ROW_GAP = 6
 local CHECK_SIZE = 24
 local CHECK_GAP = 2
-local ICON_SIZE = 16
+local ICON_SIZE = 20
+local HEADER_FONT_SIZE = 14
+local MIN_WINDOW_HEIGHT = 120
+local MAX_HEIGHT_FRACTION = 0.8
+local CHROME_HEIGHT = 66
+local ICON_RETRIES = 3
+local WIDTH_CHROME = 60
+local MIN_WIDTH_FRACTION = 0.15
+local MAX_WIDTH_FRACTION = 0.5
+local SCREEN_WIDTH_FALLBACK = 1024
 
 local REFRESH_DELAY = 0.5
 local FRIEND_EVENTS = {
@@ -21,6 +30,7 @@ local FRIEND_EVENTS = {
 local frame, scrollFrame, content
 local lines = {}
 local refreshPending = false
+local retriesLeft = ICON_RETRIES
 
 local function val(v)
     if v == nil or v == "" then
@@ -37,6 +47,51 @@ function UI.GameKey(game, projectID)
         pid = projectID
     end
     return g .. ":" .. tostring(pid)
+end
+
+-- Pure: window width fits the widest header, clamped to 15%-50% of the screen.
+function UI.ComputeWindowWidth(textWidths, screenWidth, isEmpty)
+    local screen = (type(screenWidth) == "number" and screenWidth > 0) and screenWidth or SCREEN_WIDTH_FALLBACK
+    local minW = math.floor(screen * MIN_WIDTH_FRACTION)
+    local maxW = math.max(minW, math.floor(screen * MAX_WIDTH_FRACTION))
+    if isEmpty then return minW end
+    local widest = 0
+    for _, w in ipairs(textWidths or {}) do
+        if type(w) == "number" and w > widest then widest = w end
+    end
+    local want = WIDTH_CHROME + CHECK_SIZE + CHECK_GAP + math.ceil(widest)
+    return math.min(maxW, math.max(minW, want))
+end
+
+-- Pure: header width for a given window width.
+function UI.HeaderWidth(windowWidth)
+    return math.max(1, windowWidth - WIDTH_CHROME - CHECK_SIZE - CHECK_GAP)
+end
+
+-- Pure: window height clamped between MIN_WINDOW_HEIGHT and 80% of the screen.
+function UI.ComputeWindowHeight(rowArea, screenHeight, isEmpty)
+    if isEmpty then return MIN_WINDOW_HEIGHT end
+    local screen = (type(screenHeight) == "number" and screenHeight > 0) and screenHeight or FRAME_HEIGHT
+    local maxH = math.max(MIN_WINDOW_HEIGHT, math.floor(screen * MAX_HEIGHT_FRACTION))
+    local want = CHROME_HEIGHT + math.max(0, tonumber(rowArea) or 0)
+    return math.min(maxH, math.max(MIN_WINDOW_HEIGHT, want))
+end
+
+-- Pure: row height is the larger of the checkbox and the header text.
+function UI.RowHeight(stringHeight)
+    local h = LINE_HEIGHT
+    if type(stringHeight) == "number" and stringHeight >= 1 then
+        h = stringHeight
+    end
+    return math.max(CHECK_SIZE, h)
+end
+
+-- Pure: returns schedule, newRetriesLeft.
+function UI.NextRetry(pending, retriesLeft)
+    if pending == true and retriesLeft > 0 then
+        return true, retriesLeft - 1
+    end
+    return false, retriesLeft
 end
 
 -- Returns the saved check-state table, creating or repairing it.
@@ -71,7 +126,7 @@ end
 local function create()
     frame = CreateFrame("Frame", "ForeverFilterFrame", UIParent, "BasicFrameTemplateWithInset")
     frame:SetSize(FRAME_WIDTH, FRAME_HEIGHT)
-    frame:SetPoint("CENTER")
+    frame:SetPoint("TOP", UIParent, "CENTER", 0, FRAME_HEIGHT / 2)
     frame:SetFrameStrata("MEDIUM")
     frame:SetMovable(true)
     frame:EnableMouse(true)
@@ -126,6 +181,8 @@ local function getRow(i)
             UI.SetChecked(self.game, self.projectID, self:GetChecked())
         end)
         local header = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        local fontPath = GameFontNormal and GameFontNormal.GetFont and GameFontNormal:GetFont()
+        header:SetFont(fontPath or STANDARD_TEXT_FONT, HEADER_FONT_SIZE, "")
         header:SetJustifyH("LEFT")
         header:SetWidth(content:GetWidth() - CHECK_SIZE - CHECK_GAP)
         row = { check = check, header = header }
@@ -137,8 +194,10 @@ end
 function UI.HeaderText(row)
     local Games = ns.Games
     local label
+    local pending = false
     if Games and Games.FormatGame then
-        label = Games.FormatGame(row.game, row.wowProjectID, ICON_SIZE)
+        label, pending = Games.FormatGame(row.game, row.wowProjectID, ICON_SIZE, row.subIcon)
+        pending = pending and true or false
     else
         label = val(row.game)
     end
@@ -150,7 +209,7 @@ function UI.HeaderText(row)
             debugId = " [id: none]"
         end
     end
-    return string.format("%s%s (%d)", label, debugId, row.count or 0)
+    return string.format("%s%s (%d)", label, debugId, row.count or 0), pending
 end
 
 function UI.Refresh()
@@ -162,17 +221,53 @@ function UI.Refresh()
     local nameFn = ns.Games and ns.Games.GetGameName or nil
     local rows = (ns.Friends and ns.Friends.GroupByGame and ns.Friends.GroupByGame(entries, nameFn)) or {}
 
-    local y = 0
+    local isEmpty = false
+    if #entries == 0 then
+        frame.noFriends:SetText("No Battle.net friends found.")
+        frame.noFriends:Show()
+        isEmpty = true
+    elseif #rows == 0 then
+        frame.noFriends:SetText("No friends online.")
+        frame.noFriends:Show()
+        isEmpty = true
+    else
+        frame.noFriends:Hide()
+    end
+
+    local screenWidth = UIParent:GetWidth()
+    local maxWindowWidth = UI.ComputeWindowWidth({ math.huge }, screenWidth, false)
+
+    -- Pass 1 (width): measure each header at the widest allowed width.
+    local anyPending = false
+    local textWidths = {}
     for i, row in ipairs(rows) do
         local r = getRow(i)
+        r.header:SetWidth(UI.HeaderWidth(maxWindowWidth))
+        local text, pending = UI.HeaderText(row)
+        r.header:SetText(text)
+        if pending then
+            anyPending = true
+        end
+        textWidths[#textWidths + 1] = r.header:GetStringWidth()
+    end
+    local windowWidth = UI.ComputeWindowWidth(textWidths, screenWidth, isEmpty)
+    local headerWidth = UI.HeaderWidth(windowWidth)
+
+    local left, top = frame:GetLeft(), frame:GetTop()
+    frame:SetWidth(windowWidth)
+    content:SetWidth(windowWidth - WIDTH_CHROME)
+
+    -- Pass 2 (height): lay out rows using heights measured at the final width.
+    local y = 0
+    for i, row in ipairs(rows) do
+        local r = lines[i]
         r.check.game, r.check.projectID = row.game, row.wowProjectID
         r.check:ClearAllPoints()
         r.check:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
         r.check:SetChecked(UI.IsChecked(row.game, row.wowProjectID))
         r.check:Show()
 
-        r.header:SetWidth(content:GetWidth() - CHECK_SIZE - CHECK_GAP)
-        r.header:SetText(UI.HeaderText(row))
+        r.header:SetWidth(headerWidth)
         r.header:ClearAllPoints()
         r.header:SetPoint("LEFT", r.check, "RIGHT", CHECK_GAP, 0)
         r.header:Show()
@@ -181,25 +276,35 @@ function UI.Refresh()
         if not h or h < 1 then
             h = LINE_HEIGHT
         end
-        y = y + math.max(CHECK_SIZE, h) + ROW_GAP
+        y = y + UI.RowHeight(h) + ROW_GAP
+    end
+    local rowArea = 0
+    if #rows > 0 then
+        rowArea = y - ROW_GAP
     end
     for i = #rows + 1, #lines do
         lines[i].header:SetText("")
         lines[i].header:Hide()
         lines[i].check:Hide()
     end
+    content:SetHeight(math.max(1, rowArea))
 
-    if #entries == 0 then
-        frame.noFriends:SetText("No Battle.net friends found.")
-        frame.noFriends:Show()
-    elseif #rows == 0 then
-        frame.noFriends:SetText("No friends online.")
-        frame.noFriends:Show()
-    else
-        frame.noFriends:Hide()
+    local windowHeight = UI.ComputeWindowHeight(rowArea, UIParent:GetHeight(), isEmpty)
+    frame:SetHeight(windowHeight)
+    if left and top then
+        frame:ClearAllPoints()
+        frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
+    end    if CHROME_HEIGHT + rowArea <= windowHeight then
+        scrollFrame:SetVerticalScroll(0)
     end
-    content:SetHeight(math.max(1, y))
+
+    local schedule, newLeft = UI.NextRetry(anyPending, retriesLeft)
+    retriesLeft = newLeft
+    if schedule then
+        UI.RequestRefresh()
+    end
 end
+
 -- Collapses bursts of friend events into one refresh after REFRESH_DELAY.
 function UI.RequestRefresh()
     if refreshPending then
@@ -218,6 +323,7 @@ function UI.Show()
     if not frame then
         create()
     end
+    retriesLeft = ICON_RETRIES
     frame:Show()
     UI.Refresh()
 end

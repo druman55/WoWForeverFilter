@@ -2,6 +2,9 @@ local ADDON_NAME, ns = ...
 
 ns.name = ADDON_NAME
 
+local getMeta = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
+ns.version = (getMeta and getMeta(ADDON_NAME, "Version")) or "?"
+
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
 frame:SetScript("OnEvent", function(_, event, loadedName)
@@ -9,7 +12,7 @@ frame:SetScript("OnEvent", function(_, event, loadedName)
         ForeverFilterDB = ForeverFilterDB or {}
         ns.db = ForeverFilterDB
         frame:UnregisterEvent("ADDON_LOADED")
-        print("|cff33ff99Forever Filter|r loaded. Type /ff to open the friends window.")
+        print("|cff33ff99Forever Filter|r v" .. ns.version .. " loaded. Type /ff to open the friends window.")
     end
 end)
 
@@ -18,6 +21,7 @@ SLASH_FOREVERFILTER2 = "/foreverfilter"
 SlashCmdList["FOREVERFILTER"] = function(msg)
     -- ns.UI is resolved at call time; UI.lua loads after Core.lua.
     local cmd = strtrim(msg or ""):lower()
+    print("|cff33ff99Forever Filter|r v" .. ns.version)
     if cmd == "debug" then
         ns.db = ns.db or ForeverFilterDB or {}
         ns.db.debug = not ns.db.debug

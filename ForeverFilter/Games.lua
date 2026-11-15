@@ -59,29 +59,61 @@ local function nonEmpty(s)
 end
 
 -- Returns inline icon markup for a clientProgram code, or nil when no icon is available.
-function Games.GetIconMarkup(game, size)
+-- Second return value `pending` is true only when the title icon API exists and
+-- reports the texture not ready.
+function Games.GetIconMarkup(game, size, subIcon)
     if type(game) ~= "string" or game == "" then
-        return nil
+        return nil, false
     end
     size = tonumber(size) or 14
+    if not nonEmpty(subIcon) then
+        subIcon = nil
+    end
+    local pending = false
 
     -- (a) Title-icon route, as Blizzard's own friends list does.
     local ok, markup = pcall(function()
         if C_Texture and C_Texture.IsTitleIconTextureReady and C_Texture.GetTitleIconTexture
-            and Enum and Enum.TitleIconVersion and BNet_GetClientEmbeddedTexture
-            and C_Texture.IsTitleIconTextureReady(game, Enum.TitleIconVersion.Small) then
+            and Enum and Enum.TitleIconVersion and BNet_GetClientEmbeddedTexture then
+            local version = Enum.TitleIconVersion.Small
+            local ready
+            if subIcon ~= nil then
+                ready = C_Texture.IsTitleIconTextureReady(game, version, subIcon)
+            else
+                ready = C_Texture.IsTitleIconTextureReady(game, version)
+            end
+            if not ready then
+                pending = true
+                -- Warm-up request so a later refresh finds the texture ready.
+                pcall(function()
+                    if subIcon ~= nil then
+                        C_Texture.GetTitleIconTexture(game, version, function() end, subIcon)
+                    else
+                        C_Texture.GetTitleIconTexture(game, version, function() end)
+                    end
+                end)
+                return nil
+            end
             local result
             -- The callback runs synchronously when the icon is ready.
-            C_Texture.GetTitleIconTexture(game, Enum.TitleIconVersion.Small, function(success, texture)
+            local function callback(success, texture)
                 if success then
                     result = BNet_GetClientEmbeddedTexture(texture, 32, 32, size, size, 0, 0)
                 end
-            end)
+            end
+            if subIcon ~= nil then
+                C_Texture.GetTitleIconTexture(game, version, callback, subIcon)
+            else
+                C_Texture.GetTitleIconTexture(game, version, callback)
+            end
             return result
         end
     end)
     if ok and nonEmpty(markup) then
-        return markup
+        return markup, false
+    end
+    if not ok then
+        pending = false
     end
 
     -- (b) Atlas route, only when the atlas exists (the helper would otherwise return the App icon).
@@ -92,19 +124,19 @@ function Games.GetIconMarkup(game, size)
         end
     end)
     if ok and nonEmpty(markup) then
-        return markup
+        return markup, pending
     end
 
     -- (c) No icon: text only.
-    return nil
+    return nil, pending
 end
 
--- Returns "<icon> <name>" or just "<name>". Never empty.
-function Games.FormatGame(game, projectID, size)
+-- Returns "<icon> <name>" or just "<name>", plus pending. Text is never empty.
+function Games.FormatGame(game, projectID, size, subIcon)
     local name = Games.GetGameName(game, projectID)
-    local icon = Games.GetIconMarkup(game, size)
+    local icon, pending = Games.GetIconMarkup(game, size, subIcon)
     if icon then
-        return icon .. " " .. name
+        return icon .. " " .. name, pending
     end
-    return name
+    return name, pending
 end
