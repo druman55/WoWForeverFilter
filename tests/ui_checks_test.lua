@@ -7020,6 +7020,184 @@ property("Follow-up: /ff debug is session-only and version falls back to dev", f
 end)
 
 ----------------------------------------------------------------------
+-- Task 7: addon icon (friends list button, minimap button helpers)
+----------------------------------------------------------------------
+local function loadIcons(ns)
+    ns = loadModule("Icons", ns)
+    return ns.Icons, ns
+end
+
+property("Icons: openWithFriends preference parsing and default", function()
+    local UI = loadUI({})
+    assert(UI.ReadOpenWithFriends(nil) == true)
+    assert(UI.ReadOpenWithFriends({}) == true)
+    assert(UI.ReadOpenWithFriends({ openWithFriends = "no" }) == true)
+    assert(UI.ReadOpenWithFriends({ openWithFriends = 0 }) == true)
+    assert(UI.ReadOpenWithFriends({ openWithFriends = true }) == true)
+    assert(UI.ReadOpenWithFriends({ openWithFriends = false }) == false)
+end)
+
+property("Icons: auto-open decision honours the preference", function()
+    local UI = loadUI({})
+    for i = 1, ITERATIONS do
+        local pref = pick({ true, false, nil })
+        local dismissed = random() < 0.3
+        local shown = random() < 0.3
+        local state, action = UI.NextSocialState({ dismissed = dismissed }, "social_shown",
+            { windowShown = shown, openWithFriends = pref })
+        local expect = (not shown) and (not dismissed) and pref ~= false
+        assert((action == "show") == expect, "pref=" .. tostring(pref) .. " dismissed=" .. tostring(dismissed)
+            .. " shown=" .. tostring(shown) .. " action=" .. tostring(action))
+        assert(state.autoOpened == expect)
+    end
+end)
+
+property("Icons: angle helpers range, wrap and invalid input", function()
+    local Icons = loadIcons({})
+    for i = 1, ITERATIONS do
+        local a = (random() - 0.5) * 20000
+        local n = Icons.NormalizeAngle(a)
+        assert(n >= 0 and n < 360, "range " .. tostring(n))
+        assert(math.abs(Icons.NormalizeAngle(a + 360) - n) < 1e-6 or math.abs(math.abs(Icons.NormalizeAngle(a + 360) - n) - 360) < 1e-6)
+        local r = random(10, 120)
+        local x, y = Icons.AngleToOffset(a, r)
+        assert(math.abs(math.sqrt(x * x + y * y) - r) < 1e-6, "radius")
+        -- cursor angle round trip
+        local ang = random() * 359
+        local cx, cy = 500 + math.cos(math.rad(ang)) * 50, 300 + math.sin(math.rad(ang)) * 50
+        assert(math.abs(Icons.CursorToAngle(cx, cy, 500, 300) - ang) < 1e-6)
+    end
+    assert(Icons.NormalizeAngle(-90) == 270 and Icons.NormalizeAngle(360) == 0 and Icons.NormalizeAngle(725) == 5)
+    for _, bad in ipairs({ "x", {}, true, 0 / 0, math.huge, -math.huge }) do
+        assert(Icons.NormalizeAngle(bad) == 200, "invalid angle " .. tostring(bad))
+    end
+    local x, y = Icons.AngleToOffset(0, 80)
+    assert(math.abs(x - 80) < 1e-9 and math.abs(y) < 1e-9)
+    x, y = Icons.AngleToOffset(90, 80)
+    assert(math.abs(x) < 1e-9 and math.abs(y - 80) < 1e-9)
+    assert(Icons.CursorToAngle(1, 1, 1, 1) == 200 and Icons.CursorToAngle(nil, 1, 1, 1) == 200)
+end)
+
+property("Icons: minimap settings reading and writing", function()
+    local Icons = loadIcons({})
+    local a, h = Icons.ReadMinimapSettings(nil)
+    assert(a == 200 and h == false)
+    a, h = Icons.ReadMinimapSettings({ minimap = "x" })
+    assert(a == 200 and h == false)
+    a, h = Icons.ReadMinimapSettings({ minimap = { angle = "bad", hide = "yes" } })
+    assert(a == 200 and h == false)
+    a, h = Icons.ReadMinimapSettings({ minimap = { angle = 45, hide = true } })
+    assert(a == 45 and h == true)
+    a, h = Icons.ReadMinimapSettings({ minimap = { angle = -45 } })
+    assert(a == 315 and h == false)
+    local db = {}
+    Icons.WriteMinimapSettings(db, 90, nil)
+    assert(db.minimap.angle == 90 and db.minimap.hide == false)
+    Icons.WriteMinimapSettings(db, nil, true)
+    assert(db.minimap.angle == 90 and db.minimap.hide == true)
+end)
+
+property("Icons: friends list button click saves the preference and toggles the window", function()
+    local saved = { CreateFrame = CreateFrame }
+    local ok, err = pcall(function()
+        local frames = {}
+        CreateFrame = function(_, name)
+            local f = { name = name, scripts = {}, shown = false, points = {} }
+            function f:IsShown() return self.shown end
+            function f:Show() self.shown = true end
+            function f:Hide() self.shown = false end
+            function f:SetScript(k, fn) self.scripts[k] = fn end
+            function f:SetPoint(...) self.points[#self.points + 1] = { ... } end
+            f.GetFrameLevel = function() return 3 end
+            f.CreateTexture = function() return CreateFrame("Texture") end
+            f.CreateFontString = function() return CreateFrame("FontString") end
+            f.GetWidth = function() return 100 end
+            f.GetHeight = function() return 100 end
+            f.GetScale = function() return 1 end
+            f.GetStringHeight = function() return 12 end
+            f.GetStringWidth = function() return 50 end
+            local fields = { TitleText = true, TitleContainer = true, CloseButton = true, Inset = true }
+            setmetatable(f, { __index = function(_, k)
+                if fields[k] then return nil end
+                return function() return CreateFrame("Frame") end
+            end })
+            frames[#frames + 1] = f
+            return f
+        end
+        local db = {}
+        local UI, ns = loadUI(db)
+        loadIcons(ns)
+        local close = { GetObjectType = function() return "Button" end }
+        local parent = { CloseButton = close, GetFrameLevel = function() return 1 end }
+        local b = ns.Icons.AttachFriendsButton(parent, "FriendsFrame")
+        assert(b and b.name == "ForeverFilterToggleButtonFriendsFrame")
+        assert(ns.Icons.AttachFriendsButton(parent, "FriendsFrame") == b, "created twice")
+        local p = b.points[1]
+        assert(p[1] == "RIGHT" and p[2] == close and p[3] == "LEFT", "anchor")
+        -- No close button: falls back to the frame corner.
+        local b2 = ns.Icons.AttachFriendsButton({ GetFrameLevel = function() return 1 end }, "SocialUIFrame")
+        assert(b2.points[1][1] == "TOPRIGHT")
+        b.scripts.OnClick()
+        assert(db.openWithFriends == true, "open should save true")
+        b.scripts.OnClick()
+        assert(db.openWithFriends == false, "close should save false")
+        b.scripts.OnClick()
+        assert(db.openWithFriends == true)
+        -- Closing the window with its own hide path does not change the preference.
+        UI.Hide()
+        assert(db.openWithFriends == true)
+    end)
+    CreateFrame = saved.CreateFrame
+    assert(ok, err)
+end)
+
+----------------------------------------------------------------------
+-- Window icon in the upper left (no portrait in BasicFrameTemplateWithInset)
+----------------------------------------------------------------------
+property("Window icon: texture path is set on creation and a missing portrait does not error", function()
+    local saved = { CreateFrame = CreateFrame, UIParent = UIParent }
+    local frames = {}
+    local function recFrame(name)
+        local f = { calls = {}, name = name }
+        local absent = { TitleText = true, TitleContainer = true, InsetBg = true, CloseButton = true,
+                         PortraitContainer = true, portrait = true, SetPortraitToAsset = true }
+        setmetatable(f, { __index = function(t, key)
+            if absent[key] then return nil end
+            return function(self, ...)
+                t.calls[#t.calls + 1] = { key, ... }
+                if key == "CreateFontString" or key == "CreateTexture" then return recFrame() end
+                if key == "GetFrameLevel" then return 1 end
+                if key == "IsShown" then return true end
+                if key == "GetWidth" then return 300 end
+                if key == "GetHeight" then return 1080 end
+                if key == "GetStringHeight" then return 14 end
+                if key == "GetStringWidth" then return 100 end
+            end
+        end })
+        frames[#frames + 1] = f
+        return f
+    end
+    CreateFrame = function(_, name) return recFrame(name) end
+    UIParent = recFrame("UIParent")
+    UIParent.GetWidth = function() return 1920 end
+    local ok, err = pcall(function()
+        local UI = loadUI({})
+        UI.Show()
+        local want = "Interface\\AddOns\\ForeverFilter\\Textures\\ForeverFilter_64"
+        assert(UI.ICON_TEXTURE == want, "icon path is " .. tostring(UI.ICON_TEXTURE))
+        local found = false
+        for _, f in ipairs(frames) do
+            for _, c in ipairs(f.calls) do
+                if c[1] == "SetTexture" and c[2] == want then found = true end
+            end
+        end
+        assert(found, "icon texture path was never set")
+    end)
+    CreateFrame, UIParent = saved.CreateFrame, saved.UIParent
+    assert(ok, err)
+end)
+
+----------------------------------------------------------------------
 -- (append further properties above this line)
 ----------------------------------------------------------------------
 print(string.format("%d/%d properties passed", total - failures, total))

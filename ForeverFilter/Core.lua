@@ -36,6 +36,12 @@ SlashCmdList["FOREVERFILTER"] = function(msg)
         end
         return
     end
+    if cmd == "minimap" then
+        if ns.Icons and ns.Icons.ToggleMinimap then
+            ns.Icons.ToggleMinimap()
+        end
+        return
+    end
     if cmd == "reset" then
         if ns.UI and ns.UI.ResetPosition then
             ns.UI.ResetPosition()

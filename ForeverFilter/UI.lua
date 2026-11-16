@@ -34,6 +34,10 @@ local FRIEND_EVENTS = {
 
 local frame, scrollFrame, content
 local optionsButton, optionsStrip
+local windowIcon
+
+local WINDOW_ICON_SIZE = 36
+UI.ICON_TEXTURE = "Interface\\AddOns\\ForeverFilter\\Textures\\ForeverFilter_64"
 -- Session state for the options strip, not saved.
 local optionsOpen = false
 local sliderDragging = false  -- used by the slider handlers
@@ -636,6 +640,14 @@ function UI.ComputeScaledPlacement(db, social, w, h, scale, screenW, screenH)
     return kind, left / s, top / s, side
 end
 
+-- Pure: the "open with friends list" preference. true unless db.openWithFriends is boolean false.
+function UI.ReadOpenWithFriends(db)
+    if type(db) == "table" and db.openWithFriends == false then
+        return false
+    end
+    return true
+end
+
 -- Pure: state = { autoOpened, dismissed }. Returns newState, action ("show", "hide" or nil).
 -- Never mutates state or ctx.
 function UI.NextSocialState(state, event, ctx)
@@ -645,7 +657,8 @@ function UI.NextSocialState(state, event, ctx)
     local action = nil
 
     if event == "social_shown" then
-        if c.windowShown ~= true and not dismissed then
+        -- ctx.openWithFriends == false (the saved preference) turns auto-open off.
+        if c.windowShown ~= true and not dismissed and c.openWithFriends ~= false then
             autoOpened = true
             action = "show"
         end
@@ -994,6 +1007,31 @@ local function create()
         title:SetText("Forever Filter")
     end
 
+    -- Addon icon in the upper left, where a portrait would sit. The window template
+    -- (BasicFrameTemplateWithInset) has no portrait, so use a texture on a holder frame
+    -- raised above the inset. Every step is guarded so a missing piece never errors.
+    pcall(function()
+        local portrait = frame.PortraitContainer and frame.PortraitContainer.portrait or frame.portrait
+        if portrait and portrait.SetTexture then
+            portrait:SetTexture(UI.ICON_TEXTURE)
+            return
+        end
+        if frame.SetPortraitToAsset then
+            frame:SetPortraitToAsset(UI.ICON_TEXTURE)
+            return
+        end
+        local holder = CreateFrame("Frame", nil, frame)
+        holder:SetSize(WINDOW_ICON_SIZE, WINDOW_ICON_SIZE)
+        holder:SetPoint("TOPLEFT", frame, "TOPLEFT", 6, 4)
+        if holder.SetFrameLevel and frame.GetFrameLevel then
+            holder:SetFrameLevel((frame:GetFrameLevel() or 0) + 5)
+        end
+        local icon = holder:CreateTexture(nil, "ARTWORK")
+        icon:SetAllPoints(holder)
+        icon:SetTexture(UI.ICON_TEXTURE)
+        windowIcon = icon
+    end)
+
     -- Gear button left of the close button; opens the options strip.
     optionsButton = CreateFrame("Button", nil, frame)
     optionsButton:SetSize(20, 20)
@@ -1317,6 +1355,18 @@ function UI.Toggle()
     end
 end
 
+-- Friends list button click: toggles the window and saves the choice
+-- (opening saves true, closing saves false) in ForeverFilterDB.openWithFriends.
+function UI.ToggleFromFriendsButton()
+    if frame and frame:IsShown() then
+        getDb().openWithFriends = false
+        UI.Hide()
+    else
+        getDb().openWithFriends = true
+        UI.Show()
+    end
+end
+
 -- Replaceable global lookup so tests can inject stub frames.
 function UI.LookupFrame(name)
     local g = _G
@@ -1333,7 +1383,8 @@ end
 local function onSocialShown()
     pcall(function()
         local wasShown = windowIsShown()
-        local newState, action = UI.NextSocialState(socialState, "social_shown", { windowShown = wasShown })
+        local newState, action = UI.NextSocialState(socialState, "social_shown",
+            { windowShown = wasShown, openWithFriends = UI.ReadOpenWithFriends(getDb()) })
         socialState = newState
         if action == "show" then
             openWindow()
@@ -1376,6 +1427,12 @@ function UI.TryHookSocialFrames()
                 f:HookScript("OnShow", onSocialShown)
                 f:HookScript("OnHide", onSocialHidden)
             end
+        end
+        -- Icon button: created once per frame by Icons.lua; every lookup is guarded.
+        local f = hooked[name]
+        local icons = ns.Icons
+        if f and type(icons) == "table" and type(icons.AttachFriendsButton) == "function" then
+            pcall(icons.AttachFriendsButton, f, name)
         end
     end
 end

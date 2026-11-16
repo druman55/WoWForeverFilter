@@ -4,10 +4,9 @@
 ## Author: druma
 ## Version: @project-version@
 ## Category: User Interface
-## IconTexture: Interface\Icons\achievement_guildperk_everybodysfriend
+## IconTexture: Interface\AddOns\ForeverFilter\Textures\ForeverFilter_64
 ## SavedVariables: ForeverFilterDB
-# TODO(release): replace the value below with the CurseForge project ID (About Project box).
-## X-Curse-Project-ID: REPLACE_WITH_CURSEFORGE_PROJECT_ID
+## X-Curse-Project-ID: 1810309
 # TODO(release): replace the value below with the Wago project ID (developer dashboard).
 ## X-Wago-ID: REPLACE_WITH_WAGO_PROJECT_ID
 
@@ -16,3 +15,4 @@ Friends.lua
 Games.lua
 UI.lua
 Filter.lua
+Icons.lua

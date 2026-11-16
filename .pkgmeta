@@ -9,6 +9,8 @@ ignore:
   - deploy.ps1
   - "*.code-workspace"
   - README.md
+  - description.md
+  - resources
 
 manual-changelog:
   filename: CHANGELOG.md
