@@ -28,6 +28,11 @@ local FRIEND_EVENTS = {
 }
 
 local frame, scrollFrame, content
+local optionsButton, optionsStrip
+-- Session state for the options strip, not saved.
+local optionsOpen = false
+local sliderDragging = false  -- used by the slider handlers
+local syncing = false         -- used by the slider sync code
 local lines = {}
 local refreshPending = false
 local retriesLeft = ICON_RETRIES
@@ -63,6 +68,121 @@ function UI.ComputeWindowWidth(textWidths, screenWidth, isEmpty)
     return math.min(maxW, math.max(minW, want))
 end
 
+UI.ATTACH_GAP = 4
+
+local function isFinite(v)
+    return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
+end
+
+UI.DEFAULT_SCALE = 0.85
+UI.MIN_SCALE = 0.5
+UI.MAX_SCALE = 1.5
+
+-- Pure: true for a finite number from MIN_SCALE to MAX_SCALE inclusive.
+function UI.IsValidScale(v)
+    return isFinite(v) and v >= UI.MIN_SCALE and v <= UI.MAX_SCALE
+end
+
+-- Pure: v when valid, else DEFAULT_SCALE.
+function UI.NormalizeScale(v)
+    if UI.IsValidScale(v) then return v end
+    return UI.DEFAULT_SCALE
+end
+
+UI.SCALE_STEP = 0.05
+UI.DEFAULT_SHOW_COUNTS = true
+
+local SLIDER_SCREEN_WIDTH = 140   -- on-screen width of the slider
+local SLIDER_MARGIN       = 18    -- on-screen left and right margin of the slider
+local SLIDER_SLOT         = 36    -- on-screen height of the label and slider rows
+local STRIP_ROWS_HEIGHT   = 60    -- window units: checkbox row, reset row, padding
+local STRIP_MIN_CONTENT   = 250   -- window units: checkbox row and reset button width
+
+-- Pure: nearest multiple of SCALE_STEP within MIN_SCALE..MAX_SCALE, rounded to 2 decimals.
+-- DEFAULT_SCALE for a non-number, NaN or infinity.
+function UI.SnapScale(v)
+    if not isFinite(v) then return UI.DEFAULT_SCALE end
+    if v < UI.MIN_SCALE then v = UI.MIN_SCALE end
+    if v > UI.MAX_SCALE then v = UI.MAX_SCALE end
+    local n = math.floor((v - UI.MIN_SCALE) / UI.SCALE_STEP + 0.5)
+    local r = UI.MIN_SCALE + n * UI.SCALE_STEP
+    r = math.floor(r * 100 + 0.5) / 100
+    if r < UI.MIN_SCALE then r = UI.MIN_SCALE end
+    if r > UI.MAX_SCALE then r = UI.MAX_SCALE end
+    return r
+end
+
+-- Pure: pointer offset along the slider (0 at left end, width at right end) to a snapped value.
+-- DEFAULT_SCALE when width is not a positive finite number.
+function UI.SliderValueFromOffset(offset, width)
+    if not (isFinite(width) and width > 0) then return UI.DEFAULT_SCALE end
+    if not isFinite(offset) then return UI.DEFAULT_SCALE end
+    return UI.SnapScale(UI.MIN_SCALE + (offset / width) * (UI.MAX_SCALE - UI.MIN_SCALE))
+end
+
+-- Pure: parses the text after "scale". Returns "show"|"reset"|"set"|"error", value.
+function UI.ParseScaleArg(text)
+    if type(text) ~= "string" then return "error" end
+    text = text:match("^%s*(.-)%s*$"):lower()
+    if text == "" then return "show" end
+    if text == "reset" then return "reset" end
+    if not (text:match("^%d+%.?%d*$") or text:match("^%.%d+$")) then return "error" end
+    local n = tonumber(text)
+    if UI.IsValidScale(n) then return "set", n end
+    return "error"
+end
+
+-- Pure: minimal shift that puts the window inside [0, screenW] x [0, screenH].
+-- TOPLEFT is (left, top) measured from the bottom-left of the screen.
+-- An axis where the window is larger than the screen aligns to the left/top edge.
+function UI.ClampToScreen(left, top, w, h, screenW, screenH)
+    local l, t = left, top
+    if w > screenW then
+        l = 0
+    elseif l < 0 then
+        l = 0
+    elseif l + w > screenW then
+        l = screenW - w
+    end
+    if h > screenH then
+        t = screenH
+    elseif t > screenH then
+        t = screenH
+    elseif t - h < 0 then
+        t = h
+    end
+    return l, t
+end
+
+-- Pure: side and TOPLEFT of the window beside the social menu.
+-- Returns left, top, side ("right", "left" or "clamped"), or nil for unusable input.
+function UI.ComputeAttachPosition(socialLeft, socialRight, socialTop, socialScale, uiScale,
+                                  uiWidth, uiHeight, w, h, gap)
+    if not (isFinite(socialLeft) and isFinite(socialRight) and isFinite(socialTop)
+        and isFinite(socialScale) and isFinite(uiScale) and isFinite(uiWidth)
+        and isFinite(uiHeight) and isFinite(w) and isFinite(h) and isFinite(gap)
+        and socialScale > 0 and uiScale > 0) then
+        return nil
+    end
+    local k = socialScale / uiScale
+    local rightLeft = socialRight * k + gap
+    local leftLeft = socialLeft * k - gap - w
+    local top = socialTop * k
+    local function fits(x)
+        return x >= 0 and x + w <= uiWidth
+    end
+    local left, side
+    if fits(rightLeft) then
+        left, side = rightLeft, "right"
+    elseif fits(leftLeft) then
+        left, side = leftLeft, "left"
+    else
+        left, side = rightLeft, "clamped"
+    end
+    left, top = UI.ClampToScreen(left, top, w, h, uiWidth, uiHeight)
+    return left, top, side
+end
+
 -- Pure: header width for a given window width.
 function UI.HeaderWidth(windowWidth)
     return math.max(1, windowWidth - WIDTH_CHROME - CHECK_SIZE - CHECK_GAP)
@@ -75,6 +195,37 @@ function UI.ComputeWindowHeight(rowArea, screenHeight, isEmpty)
     local maxH = math.max(MIN_WINDOW_HEIGHT, math.floor(screen * MAX_HEIGHT_FRACTION))
     local want = CHROME_HEIGHT + math.max(0, tonumber(rowArea) or 0)
     return math.min(maxH, math.max(MIN_WINDOW_HEIGHT, want))
+end
+
+-- Pure: options strip height in window units for a window scale.
+function UI.StripHeight(scale)
+    return STRIP_ROWS_HEIGHT + SLIDER_SLOT / UI.NormalizeScale(scale)
+end
+
+-- Pure: smallest window width (window units) at which the open strip fits.
+function UI.StripMinWidth(scale)
+    local s = UI.NormalizeScale(scale)
+    return math.max(STRIP_MIN_CONTENT, math.ceil((SLIDER_SCREEN_WIDTH + 2 * SLIDER_MARGIN) / s))
+end
+
+-- Pure: window height with the options strip. A nil or 0 stripHeight gives ComputeWindowHeight.
+function UI.ComputeWindowHeightWithStrip(rowArea, screenHeight, isEmpty, stripHeight)
+    if type(stripHeight) ~= "number" or stripHeight == 0 then
+        return UI.ComputeWindowHeight(rowArea, screenHeight, isEmpty)
+    end
+    if not isEmpty then
+        return UI.ComputeWindowHeight(math.max(0, tonumber(rowArea) or 0) + stripHeight, screenHeight, false)
+    end
+    local screen = (type(screenHeight) == "number" and screenHeight > 0) and screenHeight or FRAME_HEIGHT
+    local maxH = math.max(MIN_WINDOW_HEIGHT, math.floor(screen * MAX_HEIGHT_FRACTION))
+    return math.min(maxH, MIN_WINDOW_HEIGHT + stripHeight)
+end
+
+-- Pure: window width with the options strip. A nil or 0 stripMinWidth gives ComputeWindowWidth.
+function UI.ComputeWindowWidthWithStrip(textWidths, screenWidth, isEmpty, stripMinWidth)
+    local w = UI.ComputeWindowWidth(textWidths, screenWidth, isEmpty)
+    if type(stripMinWidth) ~= "number" or stripMinWidth == 0 then return w end
+    return math.max(w, stripMinWidth)
 end
 
 -- Pure: row height is the larger of the checkbox and the header text.
@@ -123,8 +274,453 @@ function UI.SetChecked(game, projectID, checked)
     getStore()[UI.GameKey(game, projectID)] = checked and true or false
 end
 
+-- Returns the saved-variables table (ns.db, else ForeverFilterDB, created if missing).
+-- Creates no window settings.
+local function getDb()
+    local db = ns.db
+    if type(db) ~= "table" then
+        db = ForeverFilterDB
+        if type(db) ~= "table" then
+            ForeverFilterDB = {}
+            db = ForeverFilterDB
+        end
+    end
+    return db
+end
+
+-- Pure read: returns moved, left, top. moved is true only for boolean true
+-- plus finite left and top. Never writes to db.
+function UI.ReadWindowSettings(db)
+    local w = type(db) == "table" and db.window or nil
+    if type(w) == "table" and w.moved == true and isFinite(w.left) and isFinite(w.top) then
+        return true, w.left, w.top
+    end
+    return false, nil, nil
+end
+
+function UI.WriteWindowSettings(db, left, top)
+    db.window = { moved = true, left = left, top = top }
+end
+
+function UI.ResetWindowSettings(db)
+    db.window = nil
+end
+
+-- Pure: reads db.windowScale through NormalizeScale; never writes.
+function UI.ReadScale(db)
+    if type(db) ~= "table" then return UI.DEFAULT_SCALE end
+    return UI.NormalizeScale(db.windowScale)
+end
+
+-- Current saved window scale (default when unset or invalid).
+function UI.GetScale()
+    return UI.ReadScale(getDb())
+end
+
+-- Stores a valid scale; returns true on success, false otherwise.
+function UI.WriteScale(db, v)
+    if type(db) ~= "table" then return false end
+    if not UI.IsValidScale(v) then return false end
+    db.windowScale = v
+    return true
+end
+
+function UI.ResetScale(db)
+    if type(db) ~= "table" then return end
+    db.windowScale = nil
+end
+
+-- Pure read: the boolean in db.showPlayerCounts, else DEFAULT_SHOW_COUNTS. Never writes.
+function UI.ReadShowCounts(db)
+    if type(db) == "table" and type(db.showPlayerCounts) == "boolean" then
+        return db.showPlayerCounts
+    end
+    return UI.DEFAULT_SHOW_COUNTS
+end
+
+-- Stores a boolean; returns true on success, false (no change) otherwise.
+function UI.WriteShowCounts(db, b)
+    if type(db) ~= "table" or type(b) ~= "boolean" then return false end
+    db.showPlayerCounts = b
+    return true
+end
+
+function UI.ResetShowCounts(db)
+    if type(db) ~= "table" then return end
+    db.showPlayerCounts = nil
+end
+
+-- Removes windowScale and showPlayerCounts only.
+function UI.ResetOptions(db)
+    if type(db) ~= "table" then return end
+    db.windowScale = nil
+    db.showPlayerCounts = nil
+end
+
+-- Pure: header text, with the " (count)" suffix only when showCounts is true.
+function UI.FormatHeader(label, debugId, count, showCounts)
+    local text = tostring(label) .. tostring(debugId or "")
+    if not showCounts then return text end
+    local n = 0
+    if isFinite(count) and count > 0 then
+        n = math.floor(count)
+    end
+    return string.format("%s (%d)", text, n)
+end
+
+-- Pure unit conversion between frame units and UIParent units.
+function UI.FrameToUIParent(v, scale)
+    return v * scale
+end
+
+function UI.UIParentToFrame(v, scale)
+    return v / scale
+end
+
+-- Pure: returns kind ("saved", "attached", "default"), left, top, side.
+function UI.ResolvePlacement(db, social, w, h, screenW, screenH)
+    local moved, sl, st = UI.ReadWindowSettings(db)
+    if moved then
+        local l, t = UI.ClampToScreen(sl, st, w, h, screenW, screenH)
+        return "saved", l, t, nil
+    end
+    if type(social) == "table" then
+        local l, t, side = UI.ComputeAttachPosition(social.left, social.right, social.top,
+            social.scale, social.uiScale, screenW, screenH, w, h, UI.ATTACH_GAP)
+        if l ~= nil then
+            return "attached", l, t, side
+        end
+    end
+    return "default", nil, nil, nil
+end
+
+-- Pure: placement at a scale. Returns kind, offsetX, offsetY (frame units), side.
+function UI.ComputeScaledPlacement(db, social, w, h, scale, screenW, screenH)
+    local s = UI.NormalizeScale(scale)
+    local kind, left, top, side = UI.ResolvePlacement(db, social, w * s, h * s, screenW, screenH)
+    if kind == "default" then
+        return "default"
+    end
+    return kind, left / s, top / s, side
+end
+
+-- Pure: state = { autoOpened, dismissed }. Returns newState, action ("show", "hide" or nil).
+-- Never mutates state or ctx.
+function UI.NextSocialState(state, event, ctx)
+    local s = type(state) == "table" and state or {}
+    local c = type(ctx) == "table" and ctx or {}
+    local autoOpened, dismissed = s.autoOpened == true, s.dismissed == true
+    local action = nil
+
+    if event == "social_shown" then
+        if c.windowShown ~= true and not dismissed then
+            autoOpened = true
+            action = "show"
+        end
+    elseif event == "social_hidden" then
+        if c.anySocialOpen ~= true then
+            dismissed = false
+            if autoOpened and c.windowShown == true then
+                action = "hide"
+            end
+        end
+    elseif event == "window_hidden" then
+        autoOpened = false
+        if c.anySocialOpen == true then
+            dismissed = true
+        end
+    elseif event == "manual_show" then
+        autoOpened = false
+        dismissed = false
+    end
+
+    return { autoOpened = autoOpened, dismissed = dismissed }, action
+end
+
+-- Session state, not saved.
+local socialState = { autoOpened = false, dismissed = false }
+-- Hooked social frames: name -> frame object.
+local hooked = {}
+
+local function anySocialOpen()
+    for _, f in pairs(hooked) do
+        if type(f) == "table" and type(f.IsShown) == "function" then
+            local ok, shown = pcall(f.IsShown, f)
+            if ok and shown then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- Read-only: returns { left, right, top, scale } of the first shown hooked frame, or nil.
+local function readSocialGeometry()
+    for _, f in pairs(hooked) do
+        if type(f) == "table" and type(f.IsShown) == "function" then
+            local okShown, shown = pcall(f.IsShown, f)
+            if okShown and shown then
+                local okL, left = pcall(f.GetLeft, f)
+                local okR, right = pcall(f.GetRight, f)
+                local okT, top = pcall(f.GetTop, f)
+                local okS, scale = pcall(f.GetEffectiveScale, f)
+                if okL and okR and okT and okS
+                    and isFinite(left) and isFinite(right) and isFinite(top) and isFinite(scale) then
+                    return { left = left, right = right, top = top, scale = scale }
+                end
+                return nil
+            end
+        end
+    end
+    return nil
+end
+
+function UI.PlaceWindow()
+    if not frame or not UIParent then
+        return
+    end
+    local social = readSocialGeometry()
+    if social then
+        social.uiScale = UIParent:GetEffectiveScale()
+    end
+    local s = frame:GetScale()
+    local kind, left, top = UI.ComputeScaledPlacement(getDb(), social, frame:GetWidth(), frame:GetHeight(),
+        s, UIParent:GetWidth(), UIParent:GetHeight())
+    if kind == "saved" or kind == "attached" then
+        frame:ClearAllPoints()
+        frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
+    end
+end
+
+-- Options strip functions, defined after ApplyScale below.
+local layoutOptions, syncOptions
+
+-- Applies the saved scale to the window, keeping its TOPLEFT at the same UIParent
+-- point (clamped to the screen). Never writes window settings and never shows the window.
+local function ApplyScale()
+    if not frame then
+        return
+    end
+    local oldScale = frame:GetScale()
+    local left, top = frame:GetLeft(), frame:GetTop()
+    local captured = type(left) == "number" and type(top) == "number"
+    if captured then
+        left = UI.FrameToUIParent(left, oldScale)
+        top = UI.FrameToUIParent(top, oldScale)
+    end
+    local s = UI.GetScale()
+    frame:SetScale(s)
+    if captured and UIParent then
+        left, top = UI.ClampToScreen(left, top, frame:GetWidth() * s, frame:GetHeight() * s,
+            UIParent:GetWidth(), UIParent:GetHeight())
+        frame:ClearAllPoints()
+        frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT",
+            UI.UIParentToFrame(left, s), UI.UIParentToFrame(top, s))
+    end
+    if optionsStrip then
+        layoutOptions()
+        syncOptions()
+    end
+    if frame:IsShown() then
+        -- While the slider thumb is held, moving the window would move the slider away from the pointer.
+        if not sliderDragging then
+            UI.PlaceWindow()
+        end
+        -- Strip height and minimum width depend on the scale.
+        if optionsOpen then
+            UI.Refresh()
+        end
+    end
+end
+
+-- Options strip (created on first use). Controls are plain, non-secure frames.
+local STRIP_TOP = 24          -- window units: strip distance below the top of the window
+local SLIDER_LABEL_ROOM = 16  -- on-screen room above the slider for the label row
+local optionsFailed = false
+local scaleSlider, scaleValueText, countCheck, resetButton
+
+local function formatScaleText(v)
+    local text = string.format("%.2f", v)
+    text = text:gsub("0+$", ""):gsub("%.$", "")
+    return text
+end
+
+layoutOptions = function()
+    if not (frame and optionsStrip and scaleSlider) then
+        return
+    end
+    local s = frame:GetScale()
+    if not (type(s) == "number" and s > 0) then
+        s = 1
+    end
+    scaleSlider:SetScale(1 / s)
+    scaleSlider:ClearAllPoints()
+    scaleSlider:SetPoint("TOPLEFT", frame, "TOPLEFT", SLIDER_MARGIN, -(STRIP_TOP * s + SLIDER_LABEL_ROOM))
+    scaleSlider:SetWidth(SLIDER_SCREEN_WIDTH)
+    local slot = SLIDER_SLOT / s
+    countCheck:ClearAllPoints()
+    countCheck:SetPoint("TOPLEFT", optionsStrip, "TOPLEFT", 8, -slot)
+    resetButton:ClearAllPoints()
+    resetButton:SetPoint("TOPLEFT", optionsStrip, "TOPLEFT", 12, -(slot + 28))
+end
+
+syncOptions = function()
+    if not (optionsStrip and scaleSlider) then
+        return
+    end
+    syncing = true
+    local v = UI.GetScale()
+    scaleSlider:SetValue(v)
+    scaleValueText:SetText(formatScaleText(v))
+    countCheck:SetChecked(UI.ReadShowCounts(getDb()))
+    syncing = false
+end
+
+local function createOptions()
+    local parent = frame.InsetBg or frame
+    local strip = CreateFrame("Frame", nil, frame)
+    strip:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, 0)
+    strip:SetPoint("TOPRIGHT", parent, "TOPRIGHT", 0, 0)
+    strip:SetHeight(1)
+    strip:Hide()
+    optionsStrip = strip
+
+    local slider
+    local okT, created = pcall(CreateFrame, "Slider", nil, strip, "OptionsSliderTemplate")
+    if okT and created then
+        slider = created
+        for _, name in ipairs({ "Text", "Low", "High" }) do
+            local part = slider[name]
+            if part and part.SetText then
+                part:SetText("")
+            end
+        end
+    else
+        slider = CreateFrame("Slider", nil, strip)
+        slider:SetOrientation("HORIZONTAL")
+        slider:SetHeight(17)
+        slider:SetThumbTexture("Interface\\Buttons\\UI-SliderBar-Button-Horizontal")
+    end
+    slider:SetMinMaxValues(UI.MIN_SCALE, UI.MAX_SCALE)
+    slider:SetValueStep(UI.SCALE_STEP)
+    if slider.SetObeyStepOnDrag then
+        slider:SetObeyStepOnDrag(true)
+    end
+
+    local label = slider:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    label:SetPoint("BOTTOMLEFT", slider, "TOPLEFT", 0, 2)
+    label:SetText("Scale")
+    scaleValueText = slider:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    scaleValueText:SetPoint("BOTTOMRIGHT", slider, "TOPRIGHT", 0, 2)
+    scaleValueText:SetText(formatScaleText(UI.GetScale()))
+
+    slider:SetScript("OnMouseDown", function()
+        sliderDragging = true
+    end)
+    slider:SetScript("OnMouseUp", function()
+        sliderDragging = false
+        UI.PlaceWindow()
+    end)
+    slider:SetScript("OnValueChanged", function(_, raw)
+        if syncing then
+            return
+        end
+        local v = UI.SnapScale(raw)
+        UI.WriteScale(getDb(), v)
+        ApplyScale()
+        scaleValueText:SetText(formatScaleText(v))
+    end)
+    scaleSlider = slider
+
+    local check = CreateFrame("CheckButton", nil, strip, "UICheckButtonTemplate")
+    check:SetSize(CHECK_SIZE, CHECK_SIZE)
+    local checkText = check.Text or check.text
+    if not checkText then
+        checkText = check:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        checkText:SetPoint("LEFT", check, "RIGHT", CHECK_GAP, 0)
+    end
+    checkText:SetText("Show player counts")
+    check:SetScript("OnClick", function(self)
+        UI.WriteShowCounts(getDb(), self:GetChecked() and true or false)
+        UI.Refresh()
+    end)
+    countCheck = check
+
+    local reset = CreateFrame("Button", nil, strip, "UIPanelButtonTemplate")
+    reset:SetSize(140, 22)
+    reset:SetText("Reset to defaults")
+    reset:SetScript("OnClick", function()
+        UI.ResetOptions(getDb())
+        ApplyScale()
+        syncOptions()
+        UI.Refresh()
+    end)
+    resetButton = reset
+end
+
+-- Creates the strip once. Returns true when it exists; false (silently) when creation failed.
+local function ensureOptions()
+    if optionsStrip and not optionsFailed then
+        return true
+    end
+    if optionsFailed or not frame then
+        return false
+    end
+    local ok = pcall(createOptions)
+    if not ok then
+        optionsFailed = true
+        if optionsStrip then
+            pcall(optionsStrip.Hide, optionsStrip)
+        end
+        optionsStrip, scaleSlider, scaleValueText, countCheck, resetButton = nil, nil, nil, nil, nil
+        return false
+    end
+    layoutOptions()
+    return true
+end
+
+function UI.ToggleOptions()
+    if not ensureOptions() then
+        return
+    end
+    optionsOpen = not optionsOpen
+    if optionsOpen then
+        layoutOptions()
+        optionsStrip:Show()
+        syncOptions()
+    else
+        optionsStrip:Hide()
+    end
+    if frame:IsShown() then
+        UI.Refresh()
+    end
+end
+
+local function scaleRangeText()
+    return string.format("%g to %g", UI.MIN_SCALE, UI.MAX_SCALE)
+end
+
+function UI.HandleScaleCommand(argText)
+    local kind, value = UI.ParseScaleArg(argText)
+    if kind == "show" then
+        print(string.format("Forever Filter: window scale is %g (allowed %s, default %g).",
+            UI.GetScale(), scaleRangeText(), UI.DEFAULT_SCALE))
+    elseif kind == "set" then
+        UI.WriteScale(getDb(), value)
+        ApplyScale()
+        print(string.format("Forever Filter: window scale set to %g.", value))
+    elseif kind == "reset" then
+        UI.ResetScale(getDb())
+        ApplyScale()
+        print(string.format("Forever Filter: window scale reset to %g.", UI.DEFAULT_SCALE))
+    else
+        print(string.format("Forever Filter: scale must be a number from %s.", scaleRangeText()))
+    end
+end
+
 local function create()
     frame = CreateFrame("Frame", "ForeverFilterFrame", UIParent, "BasicFrameTemplateWithInset")
+    frame:SetScale(UI.GetScale())
     frame:SetSize(FRAME_WIDTH, FRAME_HEIGHT)
     frame:SetPoint("TOP", UIParent, "CENTER", 0, FRAME_HEIGHT / 2)
     frame:SetFrameStrata("MEDIUM")
@@ -133,13 +729,55 @@ local function create()
     frame:SetClampedToScreen(true)
     frame:RegisterForDrag("LeftButton")
     frame:SetScript("OnDragStart", frame.StartMoving)
-    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+    frame:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        self:SetUserPlaced(false)
+        local left, top = self:GetLeft(), self:GetTop()
+        if type(left) == "number" and type(top) == "number" then
+            local s = self:GetScale()
+            UI.WriteWindowSettings(getDb(), UI.FrameToUIParent(left, s), UI.FrameToUIParent(top, s))
+        end
+    end)
     frame:Hide()
 
     local title = frame.TitleText or frame.TitleContainer and frame.TitleContainer.TitleText
     if title then
         title:SetText("Forever Filter")
     end
+
+    -- Gear button left of the close button; opens the options strip.
+    optionsButton = CreateFrame("Button", nil, frame)
+    optionsButton:SetSize(20, 20)
+    if frame.CloseButton then
+        optionsButton:SetPoint("RIGHT", frame.CloseButton, "LEFT", -2, 0)
+    else
+        optionsButton:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -30, -4)
+    end
+    local gearOk = pcall(function()
+        optionsButton:SetNormalTexture("Interface\\Buttons\\UI-OptionsButton")
+        optionsButton:SetPushedTexture("Interface\\Buttons\\UI-OptionsButton")
+        optionsButton:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
+        local normal = optionsButton:GetNormalTexture()
+        if normal and normal.SetTexCoord then normal:SetTexCoord(0, 1, 0, 1) end
+    end)
+    if not gearOk then
+        local text = optionsButton:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        text:SetPoint("CENTER")
+        text:SetText("...")
+    end
+    optionsButton:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Options")
+        GameTooltip:Show()
+    end)
+    optionsButton:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    optionsButton:SetScript("OnClick", function()
+        if UI.ToggleOptions then
+            UI.ToggleOptions()
+        end
+    end)
 
     scrollFrame = CreateFrame("ScrollFrame", "ForeverFilterScrollFrame", frame, "UIPanelScrollFrameTemplate")
     scrollFrame:SetPoint("TOPLEFT", frame.InsetBg or frame, "TOPLEFT", 8, -8)
@@ -168,6 +806,21 @@ local function create()
     frame:SetScript("OnHide", function(self)
         for _, event in ipairs(FRIEND_EVENTS) do
             self:UnregisterEvent(event)
+        end
+        socialState = UI.NextSocialState(socialState, "window_hidden", { anySocialOpen = anySocialOpen() })
+    end)
+    -- The strip is closed whenever the window hides, so it is closed on the next show.
+    frame:HookScript("OnHide", function()
+        optionsOpen = false
+        sliderDragging = false
+        if optionsStrip then
+            optionsStrip:Hide()
+        end
+    end)
+    frame:HookScript("OnShow", function()
+        optionsOpen = false
+        if optionsStrip then
+            optionsStrip:Hide()
         end
     end)
 end
@@ -209,7 +862,7 @@ function UI.HeaderText(row)
             debugId = " [id: none]"
         end
     end
-    return string.format("%s%s (%d)", label, debugId, row.count or 0), pending
+    return UI.FormatHeader(label, debugId, row.count, UI.ReadShowCounts(ns.db)), pending
 end
 
 function UI.Refresh()
@@ -234,6 +887,10 @@ function UI.Refresh()
         frame.noFriends:Hide()
     end
 
+    local scale = frame:GetScale()
+    local stripH = optionsOpen and UI.StripHeight(scale) or 0
+    local stripW = optionsOpen and UI.StripMinWidth(scale) or 0
+
     local screenWidth = UIParent:GetWidth()
     local maxWindowWidth = UI.ComputeWindowWidth({ math.huge }, screenWidth, false)
 
@@ -250,7 +907,7 @@ function UI.Refresh()
         end
         textWidths[#textWidths + 1] = r.header:GetStringWidth()
     end
-    local windowWidth = UI.ComputeWindowWidth(textWidths, screenWidth, isEmpty)
+    local windowWidth = UI.ComputeWindowWidthWithStrip(textWidths, screenWidth, isEmpty, stripW)
     local headerWidth = UI.HeaderWidth(windowWidth)
 
     local left, top = frame:GetLeft(), frame:GetTop()
@@ -289,12 +946,19 @@ function UI.Refresh()
     end
     content:SetHeight(math.max(1, rowArea))
 
-    local windowHeight = UI.ComputeWindowHeight(rowArea, UIParent:GetHeight(), isEmpty)
+    local windowHeight = UI.ComputeWindowHeightWithStrip(rowArea, UIParent:GetHeight(), isEmpty, stripH)
     frame:SetHeight(windowHeight)
+    if optionsStrip then
+        optionsStrip:SetHeight(math.max(1, stripH))
+    end
+    scrollFrame:ClearAllPoints()
+    scrollFrame:SetPoint("TOPLEFT", frame.InsetBg or frame, "TOPLEFT", 8, -(8 + stripH))
+    scrollFrame:SetPoint("BOTTOMRIGHT", frame.InsetBg or frame, "BOTTOMRIGHT", -28, 8)
     if left and top then
         frame:ClearAllPoints()
         frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
-    end    if CHROME_HEIGHT + rowArea <= windowHeight then
+    end
+    if CHROME_HEIGHT + stripH + rowArea <= windowHeight then
         scrollFrame:SetVerticalScroll(0)
     end
 
@@ -319,13 +983,27 @@ function UI.RequestRefresh()
     end)
 end
 
-function UI.Show()
+local function openWindow()
     if not frame then
         create()
     end
     retriesLeft = ICON_RETRIES
     frame:Show()
     UI.Refresh()
+    UI.PlaceWindow()
+end
+
+function UI.Show()
+    socialState = UI.NextSocialState(socialState, "manual_show", {})
+    openWindow()
+end
+
+function UI.ResetPosition()
+    UI.ResetWindowSettings(getDb())
+    if frame and frame:IsShown() then
+        UI.PlaceWindow()
+    end
+    print("Forever Filter: window position reset.")
 end
 
 function UI.Hide()
@@ -340,4 +1018,79 @@ function UI.Toggle()
     else
         UI.Show()
     end
+end
+
+-- Replaceable global lookup so tests can inject stub frames.
+function UI.LookupFrame(name)
+    local g = _G
+    if type(g) ~= "table" then return nil end
+    return g[name]
+end
+
+local SOCIAL_FRAME_NAMES = { "FriendsFrame", "SocialUIFrame" }
+
+local function windowIsShown()
+    return frame ~= nil and frame:IsShown() == true
+end
+
+local function onSocialShown()
+    pcall(function()
+        local wasShown = windowIsShown()
+        local newState, action = UI.NextSocialState(socialState, "social_shown", { windowShown = wasShown })
+        socialState = newState
+        if action == "show" then
+            openWindow()
+        elseif wasShown then
+            local moved = UI.ReadWindowSettings(getDb())
+            if not moved then
+                UI.PlaceWindow()
+            end
+        end
+        if type(C_Timer) == "table" and type(C_Timer.After) == "function" then
+            C_Timer.After(0, function()
+                pcall(function()
+                    if windowIsShown() and anySocialOpen() then
+                        UI.PlaceWindow()
+                    end
+                end)
+            end)
+        end
+    end)
+end
+
+local function onSocialHidden()
+    pcall(function()
+        local newState, action = UI.NextSocialState(socialState, "social_hidden",
+            { anySocialOpen = anySocialOpen(), windowShown = windowIsShown() })
+        socialState = newState
+        if action == "hide" then
+            UI.Hide()
+        end
+    end)
+end
+
+-- Installs OnShow/OnHide post-hooks once per social frame that exists. Safe to repeat.
+function UI.TryHookSocialFrames()
+    for _, name in ipairs(SOCIAL_FRAME_NAMES) do
+        if not hooked[name] then
+            local f = UI.LookupFrame(name)
+            if type(f) == "table" and type(f.HookScript) == "function" then
+                hooked[name] = f
+                f:HookScript("OnShow", onSocialShown)
+                f:HookScript("OnHide", onSocialHidden)
+            end
+        end
+    end
+end
+
+if type(CreateFrame) == "function" then
+    local eventFrame = CreateFrame("Frame")
+    eventFrame:RegisterEvent("PLAYER_LOGIN")
+    eventFrame:RegisterEvent("ADDON_LOADED")
+    eventFrame:SetScript("OnEvent", function(_, event)
+        UI.TryHookSocialFrames()
+        if event == "PLAYER_LOGIN" and anySocialOpen() then
+            onSocialShown()
+        end
+    end)
 end

@@ -1210,6 +1210,21 @@ property("Feature: game-list-polish, Example tests: UI.Refresh sizing, anchoring
         local p3 = callsOf(mainFrame, "SetPoint")
         assert(p3[#p3] and p3[#p3][2] == "TOPLEFT", "empty state: not re-anchored with TOPLEFT")
         assert(#callsOf(mainFrame, "SetSize") == 0, "empty state: SetSize was called")
+
+        -- social-menu-attach Requirement 3.6: resizing never writes or changes the moved flag.
+        assert(ns.db.window == nil, "Refresh created window settings")
+        ns.db.window = { moved = false, left = 7, top = 9 }
+        mainFrame.calls = {}
+        entries = { { name = "F1", isOnline = true, game = "G1" } }
+        ns.Friends.GetAll = function() return entries end
+        UI.Refresh()
+        assert(#callsOf(mainFrame, "SetHeight") == 1, "resize did not happen")
+        local win = ns.db.window
+        assert(win.moved == false and win.left == 7 and win.top == 9, "Refresh changed the window settings")
+        ns.db.window = { moved = true, left = 7, top = 9 }
+        UI.Refresh()
+        win = ns.db.window
+        assert(win.moved == true and win.left == 7 and win.top == 9, "Refresh changed the saved position")
     end)
 
     do
@@ -1367,6 +1382,1360 @@ property("Feature: game-list-polish, Property 13: Unclamped widths fit the heade
         if ww >= 87 then
             assert(hw + 26 + 60 == ww, string.format("HeaderWidth(%s)=%s not inverse", tostring(ww), tostring(hw)))
         end
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: social-menu-attach, Property 1: Right side when the window fits on the right
+-- Validates: Requirements 2.2, 2.4, 2.7
+----------------------------------------------------------------------
+property("Feature: social-menu-attach, Property 1: Right side when the window fits on the right", function()
+    local UI = loadUI({})
+    local gap = UI.ATTACH_GAP
+    local TOL = 1e-9
+
+    for i = 1, ITERATIONS do
+        local uiW = 800 + random() * 2200
+        local uiH = 500 + random() * 1500
+        local w = 50 + random() * math.min(600, uiW - gap - 100)
+        local h = 50 + random() * (uiH - 50) -- never taller than the screen
+        local socialScale = 0.4 + random() * 1.4
+        local uiScale = 0.4 + random() * 1.4
+        local k = socialScale / uiScale
+
+        -- Force the right position to fit: gap <= rightLeft <= uiW - w (with a margin for rounding).
+        local rightLeft = gap + random() * (uiW - w - gap - 1e-6)
+        local socialRight = (rightLeft - gap) / k
+        local socialLeft = socialRight - (50 + random() * 500)
+        -- Scaled top from well above to well below the screen, so vertical clamping occurs.
+        local scaledTop = -300 + random() * (uiH + 600)
+        local socialTop = scaledTop / k
+
+        local ctx = string.format("socialLeft=%s socialRight=%s socialTop=%s sScale=%s uiScale=%s ui=%sx%s w=%s h=%s",
+            tostring(socialLeft), tostring(socialRight), tostring(socialTop), tostring(socialScale),
+            tostring(uiScale), tostring(uiW), tostring(uiH), tostring(w), tostring(h))
+
+        local left, top, side = UI.ComputeAttachPosition(socialLeft, socialRight, socialTop,
+            socialScale, uiScale, uiW, uiH, w, h, gap)
+
+        assert(side == "right", "side " .. tostring(side) .. " ~= right: " .. ctx)
+        local expectedLeft = socialRight * socialScale / uiScale + gap
+        assert(math.abs(left - expectedLeft) <= TOL, string.format("left %s ~= %s: %s",
+            tostring(left), tostring(expectedLeft), ctx))
+
+        -- Minimal vertical shift: top edge at most uiH, bottom edge (top - h) at least 0.
+        local expectedTop = socialTop * socialScale / uiScale
+        if expectedTop > uiH then expectedTop = uiH end
+        if expectedTop - h < 0 then expectedTop = h end
+        assert(math.abs(top - expectedTop) <= TOL, string.format("top %s ~= %s: %s",
+            tostring(top), tostring(expectedTop), ctx))
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: social-menu-attach, Property 2: Left side when the window does not fit on the right but fits on the left
+-- Validates: Requirements 2.3, 2.5, 2.7
+----------------------------------------------------------------------
+property("Feature: social-menu-attach, Property 2: Left side when the window does not fit on the right but fits on the left", function()
+    local UI = loadUI({})
+    local gap = UI.ATTACH_GAP
+    local TOL = 1e-9
+
+    for i = 1, ITERATIONS do
+        local uiW = 800 + random() * 2200
+        local uiH = 500 + random() * 1500
+        local w = 50 + random() * math.min(600, uiW - gap - 100)
+        local h = 50 + random() * (uiH - 50)
+        local socialScale = 0.4 + random() * 1.4
+        local uiScale = 0.4 + random() * 1.4
+        local k = socialScale / uiScale
+
+        -- Left position fits: 0 <= leftLeft <= uiW - w (margin for rounding).
+        local leftLeft = 1e-6 + random() * (uiW - w - 2e-6)
+        local scaledLeft = leftLeft + gap + w
+        -- Social frame reaches far enough right that the right position cannot fit.
+        local scaledRight = math.max(scaledLeft + 50, uiW - w - gap + 1) + random() * 100
+        local socialLeft = scaledLeft / k
+        local socialRight = scaledRight / k
+        local scaledTop = -300 + random() * (uiH + 600)
+        local socialTop = scaledTop / k
+
+        local ctx = string.format("socialLeft=%s socialRight=%s socialTop=%s sScale=%s uiScale=%s ui=%sx%s w=%s h=%s",
+            tostring(socialLeft), tostring(socialRight), tostring(socialTop), tostring(socialScale),
+            tostring(uiScale), tostring(uiW), tostring(uiH), tostring(w), tostring(h))
+
+        local left, top, side = UI.ComputeAttachPosition(socialLeft, socialRight, socialTop,
+            socialScale, uiScale, uiW, uiH, w, h, gap)
+
+        assert(side == "left", "side " .. tostring(side) .. " ~= left: " .. ctx)
+        local expectedLeft = socialLeft * socialScale / uiScale - gap - w
+        assert(math.abs(left - expectedLeft) <= TOL, string.format("left %s ~= %s: %s",
+            tostring(left), tostring(expectedLeft), ctx))
+
+        local expectedTop = socialTop * socialScale / uiScale
+        if expectedTop > uiH then expectedTop = uiH end
+        if expectedTop - h < 0 then expectedTop = h end
+        assert(math.abs(top - expectedTop) <= TOL, string.format("top %s ~= %s: %s",
+            tostring(top), tostring(expectedTop), ctx))
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: social-menu-attach, Property 3: Neither side fits gives a clamped right position
+-- Validates: Requirements 2.6, 2.8
+----------------------------------------------------------------------
+property("Feature: social-menu-attach, Property 3: Neither side fits gives a clamped right position", function()
+    local UI = loadUI({})
+    local gap = UI.ATTACH_GAP
+    local TOL = 1e-9
+
+    for i = 1, ITERATIONS do
+        local uiW = 800 + random() * 2200
+        local uiH = 500 + random() * 1500
+        local w, scaledLeft, scaledRight
+        if random() < 0.4 then
+            -- Window wider than the screen: no position can fit.
+            w = uiW * (1 + random() * 0.5) + 1e-3
+            scaledLeft = -200 + random() * (uiW + 400)
+            scaledRight = scaledLeft + 50 + random() * 500
+        else
+            -- Window wider than half the screen with the social frame in the middle:
+            -- the right edge overflows and the left edge underflows.
+            w = uiW * (0.55 + random() * 0.45)
+            scaledLeft = random() * math.min(w + gap - 1e-3, uiW)
+            scaledRight = math.max(scaledLeft + 50, uiW - w - gap + 1) + random() * 100
+        end
+        local h = (random() < 0.3) and (uiH * (1 + random() * 0.5) + 1e-3) or (50 + random() * (uiH - 50))
+        local socialScale = 0.4 + random() * 1.4
+        local uiScale = 0.4 + random() * 1.4
+        local k = socialScale / uiScale
+        local socialLeft = scaledLeft / k
+        local socialRight = scaledRight / k
+        local scaledTop = -300 + random() * (uiH + 600)
+        local socialTop = scaledTop / k
+
+        local ctx = string.format("socialLeft=%s socialRight=%s socialTop=%s sScale=%s uiScale=%s ui=%sx%s w=%s h=%s",
+            tostring(socialLeft), tostring(socialRight), tostring(socialTop), tostring(socialScale),
+            tostring(uiScale), tostring(uiW), tostring(uiH), tostring(w), tostring(h))
+
+        -- Independent check that neither side fits.
+        local rightLeft = socialRight * socialScale / uiScale + gap
+        local leftLeft = socialLeft * socialScale / uiScale - gap - w
+        assert(not (rightLeft >= 0 and rightLeft + w <= uiW), "generator: right fits: " .. ctx)
+        assert(not (leftLeft >= 0 and leftLeft + w <= uiW), "generator: left fits: " .. ctx)
+
+        local left, top, side = UI.ComputeAttachPosition(socialLeft, socialRight, socialTop,
+            socialScale, uiScale, uiW, uiH, w, h, gap)
+
+        assert(side == "clamped", "side " .. tostring(side) .. " ~= clamped: " .. ctx)
+        local expectedLeft, expectedTop = UI.ClampToScreen(rightLeft,
+            socialTop * socialScale / uiScale, w, h, uiW, uiH)
+        assert(math.abs(left - expectedLeft) <= TOL, string.format("left %s ~= %s: %s",
+            tostring(left), tostring(expectedLeft), ctx))
+        assert(math.abs(top - expectedTop) <= TOL, string.format("top %s ~= %s: %s",
+            tostring(top), tostring(expectedTop), ctx))
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: social-menu-attach, Property 4: Clamping keeps the window on screen with minimal shift
+-- Validates: Requirements 2.6, 2.7, 2.8, 3.4
+----------------------------------------------------------------------
+property("Feature: social-menu-attach, Property 4: Clamping keeps the window on screen with minimal shift", function()
+    local UI = loadUI({})
+    local gap = UI.ATTACH_GAP
+    local TOL = 1e-9
+
+    for i = 1, ITERATIONS do
+        local screenW = 400 + random() * 2600
+        local screenH = 300 + random() * 1700
+        -- Sizes up to 1.5x the screen, so some windows are larger than it.
+        local w = 20 + random() * (screenW * 1.5 - 20)
+        local h = 20 + random() * (screenH * 1.5 - 20)
+        -- Positions on every side: left of, inside, and right of the screen (same vertically).
+        local left = -1.5 * screenW + random() * 3.5 * screenW
+        local top = -1.0 * screenH + random() * 3.0 * screenH
+
+        local ctx = string.format("left=%s top=%s w=%s h=%s screen=%sx%s", tostring(left), tostring(top),
+            tostring(w), tostring(h), tostring(screenW), tostring(screenH))
+
+        local l, t = UI.ClampToScreen(left, top, w, h, screenW, screenH)
+
+        -- Horizontal axis.
+        if w > screenW then
+            assert(l == 0, "oversized width must align to left edge: " .. ctx)
+        else
+            assert(l >= -TOL and l + w <= screenW + TOL, "window not inside horizontally: " .. ctx)
+            local inside = left >= 0 and left + w <= screenW
+            if inside then
+                assert(l == left, "inside position changed horizontally: " .. ctx)
+            else
+                local dist = (left < 0) and -left or (left + w - screenW)
+                assert(math.abs(math.abs(l - left) - dist) <= TOL, string.format(
+                    "horizontal shift %s ~= distance %s: %s", tostring(math.abs(l - left)), tostring(dist), ctx))
+            end
+        end
+
+        -- Vertical axis: the window spans [top - h, top].
+        if h > screenH then
+            assert(t == screenH, "oversized height must align to top edge: " .. ctx)
+        else
+            assert(t - h >= -TOL and t <= screenH + TOL, "window not inside vertically: " .. ctx)
+            local inside = top <= screenH and top - h >= 0
+            if inside then
+                assert(t == top, "inside position changed vertically: " .. ctx)
+            else
+                local dist = (top > screenH) and (top - screenH) or (h - top)
+                assert(math.abs(math.abs(t - top) - dist) <= TOL, string.format(
+                    "vertical shift %s ~= distance %s: %s", tostring(math.abs(t - top)), tostring(dist), ctx))
+            end
+        end
+    end
+
+    -- For attached results on the right or left, the clamp leaves the returned left unchanged.
+    local checked = 0
+    for i = 1, ITERATIONS do
+        local uiW = 800 + random() * 2200
+        local uiH = 500 + random() * 1500
+        local w = 50 + random() * (uiW * 0.7)
+        local h = 50 + random() * (uiH * 1.4)
+        local socialScale = 0.4 + random() * 1.4
+        local uiScale = 0.4 + random() * 1.4
+        local k = socialScale / uiScale
+        local scaledLeft = random() * uiW
+        local scaledRight = scaledLeft + 50 + random() * 400
+        local socialLeft, socialRight = scaledLeft / k, scaledRight / k
+        local socialTop = (-300 + random() * (uiH + 600)) / k
+
+        local left, top, side = UI.ComputeAttachPosition(socialLeft, socialRight, socialTop,
+            socialScale, uiScale, uiW, uiH, w, h, gap)
+        local rightLeft = socialRight * k + gap
+        local leftLeft = socialLeft * k - gap - w
+        local ctx = string.format("side=%s ui=%sx%s w=%s h=%s", tostring(side), tostring(uiW), tostring(uiH),
+            tostring(w), tostring(h))
+        if side == "right" then
+            checked = checked + 1
+            assert(math.abs(left - rightLeft) <= TOL, "clamp changed right left: " .. ctx)
+        elseif side == "left" then
+            checked = checked + 1
+            assert(math.abs(left - leftLeft) <= TOL, "clamp changed left left: " .. ctx)
+        end
+    end
+    assert(checked > 0, "generator never produced a right or left result")
+
+    -- Explicit examples.
+    local l, t = UI.ClampToScreen(-10, 50, 100, 40, 800, 600)
+    assert(l == 0 and t == 50, "left overflow example")
+    l, t = UI.ClampToScreen(750, 700, 100, 40, 800, 600)
+    assert(l == 700 and t == 600, "right and top overflow example")
+    l, t = UI.ClampToScreen(5, 10, 900, 700, 800, 600)
+    assert(l == 0 and t == 600, "oversized window example")
+end)
+
+----------------------------------------------------------------------
+-- Feature: social-menu-attach, Property 5: Unusable social geometry yields no attach position
+-- Validates: Requirements 2.9
+----------------------------------------------------------------------
+property("Feature: social-menu-attach, Property 5: Unusable social geometry yields no attach position", function()
+    local UI = loadUI({})
+    local gap = UI.ATTACH_GAP
+
+    local function genJunk(isScale)
+        local r = random(isScale and 9 or 7)
+        if r == 1 then return nil end
+        if r == 2 then return genString() end
+        if r == 3 then return {} end
+        if r == 4 then return math.huge end
+        if r == 5 then return -math.huge end
+        if r == 6 then return 0 / 0 end
+        if r == 7 then return random() < 0.5 end
+        if r == 8 then return 0 end
+        return -(random() * 5 + 0.01)
+    end
+
+    -- Argument positions of ComputeAttachPosition (gap is fixed inside ResolvePlacement).
+    local SCALE = { [4] = true, [5] = true }
+
+    for i = 1, ITERATIONS do
+        local uiW, uiH = 800 + random() * 1800, 600 + random() * 1000
+        local w, h = 100 + random() * 300, 100 + random() * 300
+        local args = {
+            random() * uiW, random() * uiW, random() * uiH, 0.5 + random() * 2, 0.5 + random() * 2,
+            uiW, uiH, w, h, gap,
+        }
+        local sound = { UI.ComputeAttachPosition(args[1], args[2], args[3], args[4], args[5],
+            args[6], args[7], args[8], args[9], args[10]) }
+        assert(sound[1] ~= nil, "generator: valid inputs gave nil")
+
+        -- Replace one to three arguments with junk (scales may also get 0 or negatives).
+        local bad = {}
+        for j = 1, 10 do bad[j] = args[j] end
+        local badCount = random(1, 3)
+        local first
+        for _ = 1, badCount do
+            local idx = random(10)
+            first = first or idx
+            bad[idx] = genJunk(SCALE[idx])
+        end
+        -- Rebuild with explicit nils preserved (select-based call, no table holes).
+        local ctx = string.format("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            show(bad[1]), show(bad[2]), show(bad[3]), show(bad[4]), show(bad[5]),
+            show(bad[6]), show(bad[7]), show(bad[8]), show(bad[9]), show(bad[10]))
+
+        local ok, l, t, side = pcall(UI.ComputeAttachPosition,
+            bad[1], bad[2], bad[3], bad[4], bad[5], bad[6], bad[7], bad[8], bad[9], bad[10])
+        assert(ok, "ComputeAttachPosition raised " .. tostring(l) .. " " .. ctx)
+        assert(l == nil and t == nil and side == nil, "expected nil, got " .. show(l) .. " " .. ctx)
+
+        -- ResolvePlacement with a non-moved db falls back to default (gap is not a parameter).
+        local db = pick({ {}, { window = { moved = false, left = 1, top = 2 } }, { window = "x" } })
+        local social = { left = bad[1], right = bad[2], top = bad[3], scale = bad[4], uiScale = bad[5] }
+        local ok2, kind, rl, rt, rside = pcall(UI.ResolvePlacement, db, social, bad[8], bad[9], bad[6], bad[7])
+        if bad[10] == args[10] then
+            assert(ok2, "ResolvePlacement raised " .. tostring(kind) .. " " .. ctx)
+            assert(kind == "default" and rl == nil and rt == nil and rside == nil,
+                "expected default, got " .. show(kind) .. " " .. ctx)
+        end
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: social-menu-attach, Property 6: Placement choice
+-- Validates: Requirements 2.1, 3.3, 3.4, 5.3, 5.4
+----------------------------------------------------------------------
+property("Feature: social-menu-attach, Property 6: Placement choice", function()
+    local UI = loadUI({})
+    local gap = UI.ATTACH_GAP
+
+    local function deepEqual(a, b)
+        if type(a) ~= type(b) then return false end
+        if type(a) ~= "table" then return a == b or (a ~= a and b ~= b) end
+        for k, v in pairs(a) do
+            if not deepEqual(v, b[k]) then return false end
+        end
+        for k in pairs(b) do
+            if a[k] == nil then return false end
+        end
+        return true
+    end
+
+    local function deepCopy(v)
+        if type(v) ~= "table" then return v end
+        local c = {}
+        for k, x in pairs(v) do c[k] = deepCopy(x) end
+        return c
+    end
+
+    local function genJunkNumber()
+        return pick({ math.huge, -math.huge, 0 / 0, "x", {}, true })
+    end
+
+    for i = 1, ITERATIONS do
+        local screenW, screenH = 800 + random() * 1800, 600 + random() * 1000
+        local w, h = 100 + random() * 500, 100 + random() * 500
+
+        -- Settings: moved (valid) or not moved (several shapes), plus an unrelated field.
+        local moved = random() < 0.5
+        local db = { debug = random() < 0.5, checkedGames = genStore() }
+        local sl, st = (random() - 0.5) * 3000, (random() - 0.5) * 2000
+        if moved then
+            db.window = { moved = true, left = sl, top = st }
+        else
+            db.window = pick({
+                false,
+                { moved = false, left = sl, top = st },
+                { moved = "yes", left = sl, top = st },
+                { moved = true, left = genJunkNumber(), top = st },
+                "x",
+            })
+            if db.window == false then db.window = nil end
+        end
+
+        -- Social geometry: nil, usable on the right, usable on the left, or junk.
+        local kind = random(4)
+        local social
+        local scale, uiScale = 0.5 + random() * 2, 0.5 + random() * 2
+        if kind == 2 then
+            local sw = 200 + random() * 200
+            local left = random() * 300
+            social = { left = left, right = left + sw, top = 300 + random() * 500, scale = scale, uiScale = uiScale }
+        elseif kind == 3 then
+            local sw = 200 + random() * 200
+            local right = (screenW - random() * 300) * uiScale / scale
+            social = { left = right - sw, right = right, top = 300 + random() * 500, scale = scale, uiScale = uiScale }
+        elseif kind == 4 then
+            social = { left = genJunkNumber(), right = random() * 500, top = random() * 500, scale = scale, uiScale = uiScale }
+            if random() < 0.5 then social = { left = 1, right = 2, top = 3 } end
+            if random() < 0.2 then social = "junk" end
+        end
+
+        local before = deepCopy(db)
+        local ok, rk, rl, rt, rside = pcall(UI.ResolvePlacement, db, social, w, h, screenW, screenH)
+        assert(ok, "ResolvePlacement raised: " .. tostring(rk))
+        assert(deepEqual(before, db), "db changed by ResolvePlacement")
+
+        if moved then
+            local el, et = UI.ClampToScreen(sl, st, w, h, screenW, screenH)
+            assert(rk == "saved", "expected saved, got " .. show(rk))
+            assert(rl == el and rt == et and rside == nil, string.format(
+                "saved position (%s, %s, %s) ~= clamped (%s, %s)", show(rl), show(rt), show(rside), show(el), show(et)))
+        else
+            local usable = type(social) == "table"
+            local al, at, aside
+            if usable then
+                al, at, aside = UI.ComputeAttachPosition(social.left, social.right, social.top,
+                    social.scale, social.uiScale, screenW, screenH, w, h, gap)
+            end
+            if al ~= nil then
+                assert(rk == "attached", "expected attached, got " .. show(rk))
+                assert(rl == al and rt == at and rside == aside, string.format(
+                    "attached (%s, %s, %s) ~= (%s, %s, %s)", show(rl), show(rt), show(rside), show(al), show(at), show(aside)))
+            else
+                assert(rk == "default" and rl == nil and rt == nil and rside == nil,
+                    "expected default, got " .. show(rk))
+            end
+        end
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: social-menu-attach, Property 7: Saved position round trip with field preservation
+-- Validates: Requirements 3.2, 7.1, 7.4
+----------------------------------------------------------------------
+property("Feature: social-menu-attach, Property 7: Saved position round trip with field preservation", function()
+    local UI = loadUI({})
+
+    local function deepEqual(a, b)
+        if type(a) ~= type(b) then return false end
+        if type(a) ~= "table" then return a == b or (a ~= a and b ~= b) end
+        for k, v in pairs(a) do
+            if not deepEqual(v, b[k]) then return false end
+        end
+        for k in pairs(b) do
+            if a[k] == nil then return false end
+        end
+        return true
+    end
+
+    local function deepCopy(v)
+        if type(v) ~= "table" then return v end
+        local c = {}
+        for k, x in pairs(v) do c[k] = deepCopy(x) end
+        return c
+    end
+
+    for i = 1, ITERATIONS do
+        -- Random extra fields (anything but "window"), optionally with a stale window entry.
+        local db = {}
+        for _ = 1, random(0, 6) do
+            local k = pick({ "debug", "version", "x", "checkedGames", genString(), random(1, 5) })
+            if k ~= "window" then
+                db[k] = pick({ random(-5, 5), genString(), random() < 0.5, genStore(), { nested = { genString() } } })
+            end
+        end
+        if random() < 0.5 then
+            db.window = pick({ { moved = false, left = 1, top = 2 }, "x", { moved = true, left = 5, top = 6 } })
+        end
+
+        local others = deepCopy(db)
+        others.window = nil
+
+        local left, top = (random() - 0.5) * 6000, (random() - 0.5) * 4000
+        if random() < 0.2 then left = random(-3000, 3000) end
+        if random() < 0.2 then top = random(-3000, 3000) end
+
+        local ok, err = pcall(UI.WriteWindowSettings, db, left, top)
+        assert(ok, "WriteWindowSettings raised: " .. tostring(err))
+
+        local moved, rl, rt = UI.ReadWindowSettings(db)
+        assert(moved == true, "moved ~= true after write")
+        assert(rl == left and rt == top, string.format("read (%s, %s) ~= written (%s, %s)",
+            show(rl), show(rt), show(left), show(top)))
+
+        local after = deepCopy(db)
+        after.window = nil
+        assert(deepEqual(others, after), "fields other than window changed by WriteWindowSettings")
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: social-menu-attach, Property 8: Settings validation and read purity
+-- Validates: Requirements 7.2, 7.3, 7.5
+----------------------------------------------------------------------
+property("Feature: social-menu-attach, Property 8: Settings validation and read purity", function()
+    local UI = loadUI({})
+
+    local function deepEqual(a, b)
+        if type(a) ~= type(b) then return false end
+        if type(a) ~= "table" then return a == b or (a ~= a and b ~= b) end
+        for k, v in pairs(a) do
+            if not deepEqual(v, b[k]) then return false end
+        end
+        for k in pairs(b) do
+            if a[k] == nil then return false end
+        end
+        return true
+    end
+
+    local function deepCopy(v)
+        if type(v) ~= "table" then return v end
+        local c = {}
+        for k, x in pairs(v) do c[k] = deepCopy(x) end
+        return c
+    end
+
+    local function isFiniteNumber(v)
+        return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
+    end
+
+    local function genCoord()
+        local r = random(10)
+        if r <= 4 then return (random() - 0.5) * 6000 end
+        if r == 5 then return random(-3000, 3000) end
+        if r == 6 then return 0 / 0 end
+        if r == 7 then return math.huge end
+        if r == 8 then return -math.huge end
+        if r == 9 then return pick({ "10", "", "x", true, false }) end
+        return pick({ {}, function() end, nil })
+    end
+
+    local function genMoved()
+        return pick({ true, true, true, false, "true", 1, 0, "", {}, nil })
+    end
+
+    local function genWindow()
+        local r = random(8)
+        if r == 1 then return nil end
+        if r == 2 then return pick({ "x", 5, true, false, function() end }) end
+        local w = { moved = genMoved(), left = genCoord(), top = genCoord() }
+        if random() < 0.3 then w.extra = genString() end
+        return w
+    end
+
+    local function genDb()
+        if random() < 0.1 then return pick({ "str", 7, true, false }) end
+        local db = {}
+        for _ = 1, random(0, 4) do
+            local k = pick({ "debug", "version", "x", "checkedGames", genString() })
+            if k ~= "window" then
+                db[k] = pick({ random(-5, 5), genString(), random() < 0.5, genStore() })
+            end
+        end
+        db.window = genWindow()
+        return db
+    end
+
+    for i = 1, ITERATIONS do
+        local db = genDb()
+        local before = deepCopy(db)
+        local dbGlobalBefore = ForeverFilterDB
+
+        local ok, moved, left, top = pcall(UI.ReadWindowSettings, db)
+        assert(ok, "ReadWindowSettings raised: " .. tostring(moved))
+
+        local w = type(db) == "table" and db.window or nil
+        local expectMoved = type(w) == "table" and w.moved == true
+            and isFiniteNumber(w.left) and isFiniteNumber(w.top)
+
+        assert(moved == expectMoved, string.format("moved %s, expected %s", tostring(moved), tostring(expectMoved)))
+        if expectMoved then
+            assert(left == w.left and top == w.top, string.format("read (%s, %s) ~= stored (%s, %s)",
+                show(left), show(top), show(w.left), show(w.top)))
+        else
+            assert(moved == false, "moved must be boolean false when invalid")
+        end
+
+        assert(deepEqual(before, db), "db changed by ReadWindowSettings")
+        assert(ForeverFilterDB == dbGlobalBefore, "ReadWindowSettings created or replaced ForeverFilterDB")
+    end
+
+    -- Explicit cases.
+    assert(UI.ReadWindowSettings(nil) == false)
+    assert(UI.ReadWindowSettings({}) == false)
+    assert(UI.ReadWindowSettings({ window = "x" }) == false)
+    assert(UI.ReadWindowSettings({ window = { moved = 1, left = 1, top = 1 } }) == false)
+    assert(UI.ReadWindowSettings({ window = { moved = true, left = 0 / 0, top = 1 } }) == false)
+    assert(UI.ReadWindowSettings({ window = { moved = true, left = 1, top = math.huge } }) == false)
+    assert(UI.ReadWindowSettings({ window = { moved = true, left = 1, top = 2 } }) == true)
+end)
+
+----------------------------------------------------------------------
+-- Feature: social-menu-attach, Property 9: Reset clears only the window settings
+-- Validates: Requirements 6.1
+----------------------------------------------------------------------
+property("Feature: social-menu-attach, Property 9: Reset clears only the window settings", function()
+    local UI = loadUI({})
+
+    local function genWindow()
+        local r = random(4)
+        if r == 1 then return nil end
+        if r == 2 then return pick({ "x", 5, true, false }) end
+        return {
+            moved = pick({ true, true, false, "true", 1 }),
+            left = pick({ random(-3000, 3000), (random() - 0.5) * 6000, 0 / 0, math.huge, "10" }),
+            top = pick({ random(-3000, 3000), (random() - 0.5) * 6000, 0 / 0, -math.huge, "x" }),
+        }
+    end
+
+    for i = 1, ITERATIONS do
+        local db = {}
+        for _ = 1, random(0, 6) do
+            local k = pick({ "debug", "version", "x", "checkedGames", genString() })
+            if k ~= "window" then
+                db[k] = pick({ random(-5, 5), genString(), random() < 0.5, genStore() })
+            end
+        end
+        db.window = genWindow()
+        -- Force a valid saved position on some iterations.
+        if random() < 0.4 then
+            db.window = { moved = true, left = random(-500, 500), top = random(-500, 500) }
+        end
+
+        local before = {}
+        for k, v in pairs(db) do
+            if k ~= "window" then before[k] = v end
+        end
+
+        local ok, err = pcall(UI.ResetWindowSettings, db)
+        assert(ok, "ResetWindowSettings raised: " .. tostring(err))
+
+        assert(UI.ReadWindowSettings(db) == false, "moved is not false after reset")
+        assert(db.window == nil, "window settings not cleared")
+        for k, v in pairs(before) do
+            assert(rawequal(db[k], v), "non-window field changed: " .. show(k))
+        end
+        for k in pairs(db) do
+            assert(before[k] ~= nil, "unexpected field after reset: " .. show(k))
+        end
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: social-menu-attach, Property 10: Social menu transition decisions
+-- Validates: Requirements 1.1, 1.2, 4.1, 4.2, 4.6, 5.1
+----------------------------------------------------------------------
+property("Feature: social-menu-attach, Property 10: Social menu transition decisions", function()
+    local UI = loadUI({})
+    local events = { "social_shown", "social_hidden", "manual_show" }
+
+    for i = 1, ITERATIONS do
+        local state = { autoOpened = random() < 0.5, dismissed = random() < 0.5 }
+        local ctx = { windowShown = random() < 0.5, anySocialOpen = random() < 0.5 }
+        local event = pick(events)
+
+        local stateBefore = { autoOpened = state.autoOpened, dismissed = state.dismissed }
+        local ctxBefore = { windowShown = ctx.windowShown, anySocialOpen = ctx.anySocialOpen }
+
+        local newState, action = UI.NextSocialState(state, event, ctx)
+
+        local where = string.format("event=%s autoOpened=%s dismissed=%s windowShown=%s anySocialOpen=%s",
+            event, tostring(state.autoOpened), tostring(state.dismissed),
+            tostring(ctx.windowShown), tostring(ctx.anySocialOpen))
+
+        local expectShow = event == "social_shown" and not ctx.windowShown and not state.dismissed
+        local expectHide = event == "social_hidden" and not ctx.anySocialOpen
+            and state.autoOpened and ctx.windowShown
+
+        assert((action == "show") == expectShow, "show decision wrong: " .. where)
+        assert((action == "hide") == expectHide, "hide decision wrong: " .. where)
+        assert(action == nil or action == "show" or action == "hide", "unexpected action: " .. where)
+        if action == nil then
+            assert(not expectShow and not expectHide, "missing action: " .. where)
+        end
+
+        if action == "show" then
+            assert(newState.autoOpened == true, "autoOpened not set on show: " .. where)
+        end
+        if event == "manual_show" then
+            assert(action == nil, "manual_show returned an action: " .. where)
+            assert(newState.autoOpened == false and newState.dismissed == false,
+                "manual_show did not clear flags: " .. where)
+        end
+
+        -- Inputs are not mutated, and the result is a distinct table.
+        assert(state.autoOpened == stateBefore.autoOpened and state.dismissed == stateBefore.dismissed,
+            "input state mutated: " .. where)
+        assert(ctx.windowShown == ctxBefore.windowShown and ctx.anySocialOpen == ctxBefore.anySocialOpen,
+            "ctx mutated: " .. where)
+        assert(newState ~= state, "returned the input state table: " .. where)
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: social-menu-attach, Property 11: Session state invariants over event sequences
+-- Validates: Requirements 4.3, 4.4, 4.5
+----------------------------------------------------------------------
+property("Feature: social-menu-attach, Property 11: Session state invariants over event sequences", function()
+    local UI = loadUI({})
+    local steps = { "social_open", "social_close", "user_close", "ff_show", "ff_hide" }
+
+    for i = 1, ITERATIONS do
+        local state = { autoOpened = false, dismissed = false }
+        local windowShown = false
+        local social = { false, false } -- FriendsFrame, SocialUIFrame
+        local log = {}
+
+        local function anySocialOpen() return social[1] or social[2] end
+
+        local function apply(event, ctx)
+            local newState, action = UI.NextSocialState(state, event, ctx)
+            state = newState
+            return action
+        end
+
+        -- Hiding the window fires its OnHide, which applies window_hidden.
+        local function hideWindow()
+            if not windowShown then return end
+            windowShown = false
+            apply("window_hidden", { anySocialOpen = anySocialOpen() })
+        end
+
+        for step = 1, random(1, 40) do
+            local s = pick(steps)
+            local idx = random(2)
+            log[#log + 1] = s .. (s:find("^social") and idx or "")
+            local userClosedWithSocial = false
+
+            if s == "social_open" then
+                if not social[idx] then
+                    social[idx] = true
+                    local action = apply("social_shown", { windowShown = windowShown })
+                    if action == "show" then windowShown = true end
+                end
+            elseif s == "social_close" then
+                if social[idx] then
+                    social[idx] = false
+                    local action = apply("social_hidden",
+                        { anySocialOpen = anySocialOpen(), windowShown = windowShown })
+                    if action == "hide" then hideWindow() end
+                end
+            elseif s == "user_close" then
+                if windowShown then
+                    userClosedWithSocial = anySocialOpen()
+                    hideWindow()
+                end
+            elseif s == "ff_show" then
+                apply("manual_show", {})
+                windowShown = true
+            else -- ff_hide
+                hideWindow()
+            end
+
+            local where = string.format("after [%s]: autoOpened=%s dismissed=%s windowShown=%s social=%s/%s",
+                table.concat(log, ","), tostring(state.autoOpened), tostring(state.dismissed),
+                tostring(windowShown), tostring(social[1]), tostring(social[2]))
+
+            if not anySocialOpen() then
+                assert(state.dismissed == false, "dismissed set with no social frame open " .. where)
+            end
+            if not windowShown then
+                assert(state.autoOpened == false, "autoOpened set with window hidden " .. where)
+            end
+            if userClosedWithSocial then
+                assert(not windowShown and state.dismissed == true,
+                    "user close with social open did not dismiss " .. where)
+            end
+        end
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: social-menu-attach, Example tests for the frame wiring
+-- Validates: Requirements 1.3, 1.4, 1.5, 1.6, 2.4, 2.5, 2.6, 2.9, 2.10, 2.11, 3.5, 5.6, 6.2, 6.3,
+--            8.1, 8.3, 8.6, 9.1, 9.3, 10.5
+----------------------------------------------------------------------
+local function wiringEnv(winW, winH)
+    local saved = {
+        CreateFrame = CreateFrame, UIParent = UIParent, C_Timer = C_Timer,
+        UISpecialFrames = UISpecialFrames, print = print,
+    }
+    local env = { log = {}, timers = {}, printed = {}, violations = {}, stubs = {} }
+
+    local absent = { TitleText = true, TitleContainer = true, InsetBg = true }
+    local newFrame
+    local impl = {
+        Show = function(self)
+            self.shown = true
+            local s = self.scripts.OnShow
+            if s then s(self) end
+        end,
+        Hide = function(self)
+            local was = self.shown
+            self.shown = false
+            local s = self.scripts.OnHide
+            if was and s then s(self) end
+        end,
+        IsShown = function(self) return self.shown end,
+        SetScript = function(self, name, fn) self.scripts[name] = fn end,
+        SetPoint = function(self, ...)
+            if rawget(self, "isWindow") then env.log[#env.log + 1] = { "SetPoint", ... } end
+        end,
+        ClearAllPoints = function(self)
+            if rawget(self, "isWindow") then env.log[#env.log + 1] = { "ClearAllPoints" } end
+        end,
+        SetWidth = function(self, v) self.w = v end,
+        SetHeight = function(self, v) self.h = v end,
+        SetSize = function(self, a, b) self.w, self.h = a, b end,
+        GetWidth = function(self) return self.w end,
+        GetHeight = function(self) return self.h end,
+        GetLeft = function(self) return rawget(self, "left") end,
+        GetTop = function(self) return rawget(self, "top") end,
+        GetEffectiveScale = function() return 1 end,
+        SetScale = function(self, v) rawset(self, "scale", v) end,
+        GetScale = function(self) return rawget(self, "scale") or 1 end,
+        CreateFontString = function() return newFrame() end,
+        CreateTexture = function() return newFrame() end,
+    }
+    newFrame = function(name)
+        local f = { name = name, calls = {}, shown = false, scripts = {}, w = 0, h = 0 }
+        return setmetatable(f, { __index = function(t, k)
+            if absent[k] then return nil end
+            return function(self, ...)
+                t.calls[#t.calls + 1] = { k, ... }
+                local fn = impl[k]
+                if fn then return fn(self, ...) end
+            end
+        end })
+    end
+
+    UIParent = newFrame("UIParent")
+    UIParent.w, UIParent.h = 1920, 1080
+    CreateFrame = function(_, name)
+        local f = newFrame(name)
+        if name == "ForeverFilterFrame" then
+            env.win = f
+            f.isWindow = true
+        end
+        return f
+    end
+    C_Timer = { After = function(delay, cb) env.timers[#env.timers + 1] = { delay = delay, cb = cb } end }
+    UISpecialFrames = {}
+    print = function(...)
+        local parts = {}
+        for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
+        env.printed[#env.printed + 1] = table.concat(parts, " ")
+    end
+
+    -- These wiring tests assert scale-1 geometry, so pin the saved scale to 1.
+    local UI, ns = loadUI({ windowScale = 1 })
+    env.UI, env.ns = UI, ns
+    local origRefresh = UI.Refresh
+    UI.Refresh = function()
+        env.log[#env.log + 1] = { "Refresh" }
+        origRefresh()
+        env.win.w, env.win.h = winW, winH
+    end
+    UI.LookupFrame = function(name) return env.stubs[name] end
+
+    -- Social frame stub: only these members exist; any other access raises and is recorded.
+    function env.social(left, right, top)
+        local s = { left = left, right = right, top = top, scale = 1, shown = true, hooks = {}, hookCount = {} }
+        rawset(s, "GetLeft", function(self) return self.left end)
+        rawset(s, "GetRight", function(self) return self.right end)
+        rawset(s, "GetTop", function(self) return self.top end)
+        rawset(s, "GetEffectiveScale", function(self) return self.scale end)
+        rawset(s, "IsShown", function(self) return self.shown end)
+        rawset(s, "HookScript", function(self, ev, fn)
+            self.hooks[ev] = fn
+            self.hookCount[ev] = (self.hookCount[ev] or 0) + 1
+        end)
+        return setmetatable(s, { __index = function(_, k)
+            env.violations[#env.violations + 1] = tostring(k)
+            error("unexpected access to social frame member " .. tostring(k), 2)
+        end })
+    end
+
+    function env.points()
+        local out = {}
+        for _, e in ipairs(env.log) do
+            if e[1] == "SetPoint" then out[#out + 1] = e end
+        end
+        return out
+    end
+
+    function env.restore()
+        CreateFrame, UIParent, C_Timer = saved.CreateFrame, saved.UIParent, saved.C_Timer
+        UISpecialFrames, print = saved.UISpecialFrames, saved.print
+    end
+    return env
+end
+
+local function withWiring(winW, winH, fn)
+    local env = wiringEnv(winW, winH)
+    local ok, err = pcall(fn, env)
+    env.restore()
+    assert(ok, err)
+end
+
+property("Feature: social-menu-attach, Example tests: hooks installed once, missing frames tolerated", function()
+    withWiring(300, 400, function(env)
+        local UI = env.UI
+        -- Frames missing: no error, nothing hooked.
+        UI.TryHookSocialFrames()
+        UI.TryHookSocialFrames()
+
+        env.stubs.FriendsFrame = env.social(100, 485, 900)
+        env.stubs.SocialUIFrame = env.social(100, 560, 900)
+        UI.TryHookSocialFrames()
+        UI.TryHookSocialFrames()
+        for name, s in pairs(env.stubs) do
+            assert(s.hookCount.OnShow == 1, name .. " OnShow hooked " .. tostring(s.hookCount.OnShow) .. " times")
+            assert(s.hookCount.OnHide == 1, name .. " OnHide hooked " .. tostring(s.hookCount.OnHide) .. " times")
+            assert(type(s.hooks.OnShow) == "function" and type(s.hooks.OnHide) == "function")
+        end
+        assert(#env.violations == 0, "unexpected social frame access: " .. table.concat(env.violations, ","))
+    end)
+end)
+
+property("Feature: social-menu-attach, Example tests: auto-open refreshes then places once beside the social frame", function()
+    withWiring(300, 400, function(env)
+        local UI = env.UI
+        local social = env.social(100, 485, 900)
+        env.stubs.FriendsFrame = social
+        UI.TryHookSocialFrames()
+
+        social.hooks.OnShow()
+        local win = env.win
+        assert(win and win.shown, "window was not opened by the social OnShow hook")
+
+        local refreshAt
+        for i, e in ipairs(env.log) do
+            if e[1] == "Refresh" then refreshAt = i end
+        end
+        assert(refreshAt, "Refresh was not called")
+        local after = {}
+        for i = refreshAt + 1, #env.log do
+            if env.log[i][1] == "SetPoint" then after[#after + 1] = env.log[i] end
+        end
+        assert(#after == 1, "expected one anchor after Refresh, got " .. #after)
+        local p = after[1]
+        assert(p[2] == "TOPLEFT" and p[3] == UIParent and p[4] == "BOTTOMLEFT", "wrong anchor")
+        -- Stub near the left edge: window to the right of the stub (right edge 485 + gap 4).
+        assert(p[5] == 489 and p[6] == 900, "placed at " .. tostring(p[5]) .. "," .. tostring(p[6]))
+        assert(#env.timers == 1 and env.timers[1].delay == 0, "deferred placement not scheduled")
+        assert(env.ns.db.window == nil, "placement wrote window settings")
+
+        -- Requirement 5.6.
+        local found = false
+        for _, n in ipairs(UISpecialFrames) do if n == "ForeverFilterFrame" then found = true end end
+        assert(found, "UISpecialFrames lacks ForeverFilterFrame")
+        assert(#env.violations == 0, "unexpected social frame access: " .. table.concat(env.violations, ","))
+    end)
+end)
+
+property("Feature: social-menu-attach, Example tests: side choice and clamping", function()
+    local function placeFor(winW, left, right)
+        local result
+        withWiring(winW, 400, function(env)
+            local social = env.social(left, right, 900)
+            env.stubs.FriendsFrame = social
+            env.UI.TryHookSocialFrames()
+            social.hooks.OnShow()
+            local pts = env.points()
+            local p = pts[#pts]
+            assert(p and p[2] == "TOPLEFT", "no TOPLEFT anchor")
+            result = { left = p[5], top = p[6] }
+        end)
+        return result
+    end
+
+    -- Near the right edge: no room on the right, so the window goes left of the stub.
+    local r = placeFor(300, 1500, 1885)
+    assert(r.left == 1196, "left-side placement at " .. tostring(r.left))
+    assert(r.left + 300 <= 1500, "window overlaps the stub")
+
+    -- Wider than both gaps: ends inside the screen.
+    local c = placeFor(1000, 600, 985)
+    assert(c.left >= 0 and c.left + 1000 <= 1920, "clamped placement outside screen: " .. tostring(c.left))
+    assert(c.top <= 1080 and c.top - 400 >= 0, "clamped top outside screen: " .. tostring(c.top))
+end)
+
+property("Feature: social-menu-attach, Example tests: deferred placement and error containment", function()
+    -- Deferred placement runs while the social frame is shown, and is skipped once it is hidden.
+    withWiring(300, 400, function(env)
+        local social = env.social(100, 485, 900)
+        env.stubs.FriendsFrame = social
+        env.UI.TryHookSocialFrames()
+        social.hooks.OnShow()
+        local n = #env.points()
+        env.timers[1].cb()
+        assert(#env.points() == n + 1, "deferred placement did not re-place while social shown")
+        social.shown = false
+        env.timers[1].cb()
+        assert(#env.points() == n + 1, "deferred placement ran with the social frame hidden")
+        assert(#env.violations == 0, "unexpected social frame access: " .. table.concat(env.violations, ","))
+    end)
+
+    -- A throwing GetRight: callback stays silent, window shown at the default position.
+    withWiring(300, 400, function(env)
+        local social = env.social(100, 485, 900)
+        rawset(social, "GetRight", function() error("boom") end)
+        env.stubs.FriendsFrame = social
+        env.UI.TryHookSocialFrames()
+        local ok, err = pcall(social.hooks.OnShow)
+        assert(ok, "hook callback raised: " .. tostring(err))
+        assert(env.win and env.win.shown, "window not shown")
+        for _, p in ipairs(env.points()) do
+            assert(p[2] ~= "TOPLEFT", "window was placed despite unusable geometry ")
+        end
+        assert(#env.printed == 0, "callback printed: " .. tostring(env.printed[1]))
+        env.timers[1].cb()
+        for _, p in ipairs(env.points()) do
+            assert(p[2] ~= "TOPLEFT", "deferred placement moved the window despite unusable geometry")
+        end
+    end)
+end)
+
+property("Feature: social-menu-attach, Example tests: drag handler and UI.ResetPosition", function()
+    -- Drag: unregisters client persistence and writes the position.
+    withWiring(300, 400, function(env)
+        local social = env.social(100, 485, 900)
+        env.stubs.FriendsFrame = social
+        env.UI.TryHookSocialFrames()
+        social.hooks.OnShow()
+        local win = env.win
+        assert(env.ns.db.window == nil, "window settings written before any drag")
+
+        win.left, win.top = 321, 654
+        win.calls = {}
+        win.scripts.OnDragStop(win)
+        local sawUserPlaced, sawStop = false, false
+        for _, c in ipairs(win.calls) do
+            if c[1] == "SetUserPlaced" and c[2] == false then sawUserPlaced = true end
+            if c[1] == "StopMovingOrSizing" then sawStop = true end
+        end
+        assert(sawStop, "StopMovingOrSizing not called")
+        assert(sawUserPlaced, "SetUserPlaced(false) not called")
+        local w = env.ns.db.window
+        assert(w and w.moved == true and w.left == 321 and w.top == 654, "position not saved")
+
+        -- A saved position wins over attaching on the next placement.
+        env.UI.PlaceWindow()
+        local pts = env.points()
+        assert(pts[#pts][5] == 321 and pts[#pts][6] == 654, "saved position not used")
+
+        -- ResetPosition while shown: clears settings, re-places beside the social frame, confirms.
+        local before = #env.points()
+        env.UI.ResetPosition()
+        assert(env.ns.db.window == nil, "reset left window settings")
+        local after = env.points()
+        assert(#after == before + 1 and after[#after][5] == 489, "reset did not re-place the shown window")
+        assert(#env.printed == 1, "reset printed " .. #env.printed .. " lines")
+
+        -- ResetPosition while hidden: clears settings, no placement.
+        env.UI.WriteWindowSettings(env.ns.db, 5, 6)
+        win:Hide()
+        local hiddenBefore = #env.points()
+        env.UI.ResetPosition()
+        assert(env.ns.db.window == nil, "hidden reset left window settings")
+        assert(#env.points() == hiddenBefore, "hidden reset placed the window")
+        assert(#env.printed == 2, "hidden reset printed " .. #env.printed .. " lines total")
+    end)
+
+    -- ResetPosition before the window was ever created.
+    withWiring(300, 400, function(env)
+        env.UI.WriteWindowSettings(env.ns.db, 5, 6)
+        env.UI.ResetPosition()
+        assert(env.ns.db.window == nil and env.win == nil, "reset before creation misbehaved")
+    end)
+end)
+
+----------------------------------------------------------------------
+-- Feature: options-panel, Property 1: Snap always produces a valid, stable scale
+-- Validates: Requirements 3.4, 3.5, 3.7, 3.8
+----------------------------------------------------------------------
+property("Feature: options-panel, Property 1: Snap always produces a valid, stable scale", function()
+    local UI = loadUI({})
+    local nan = 0 / 0
+    local function genSnapInput()
+        local r = random(12)
+        if r == 1 then return -1 + random() * 4 end
+        if r == 2 then return 0.5 + random(0, 20) * 0.05 end
+        if r == 3 then return 0.5 + random(0, 20) * 0.05 + (random() - 0.5) * 0.001 end
+        if r == 4 then return pick({ 0.5, 1.5, 0.85, 0, -0, 0.4999999, 1.5000001, 0.525, 0.575 }) end
+        if r == 5 then return (random() < 0.5 and -1 or 1) * 10 ^ random(6, 300) end
+        if r == 6 then return nan end
+        if r == 7 then return pick({ math.huge, -math.huge }) end
+        if r == 8 then return pick({ "0.85", "1", "", "abc" }) end
+        if r == 9 then return random() < 0.5 end
+        if r == 10 then return {} end
+        if r == 11 then return nil end
+        return random(-5, 5)
+    end
+
+    for i = 1, ITERATIONS do
+        local v = genSnapInput()
+        local ctx = "(v=" .. show(v) .. ")"
+        local s = UI.SnapScale(v)
+        assert(UI.IsValidScale(s), "snap result invalid " .. show(s) .. " " .. ctx)
+        local again = UI.SnapScale(s)
+        assert(again == s, "snap not idempotent " .. show(s) .. " -> " .. show(again) .. " " .. ctx)
+        if type(v) ~= "number" or v ~= v or v == math.huge or v == -math.huge then
+            assert(s == UI.DEFAULT_SCALE, "non-finite input gave " .. show(s) .. " " .. ctx)
+        end
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: options-panel, Property 2: Snap picks the nearest step inside the range
+-- Validates: Requirements 3.3, 3.6
+----------------------------------------------------------------------
+property("Feature: options-panel, Property 2: Snap picks the nearest step inside the range", function()
+    local UI = loadUI({})
+    local function genFinite()
+        local r = random(7)
+        if r == 1 then return -1 + random() * 4 end
+        if r == 2 then return 0.5 + random(0, 20) * 0.05 end
+        if r == 3 then return 0.5 + random(0, 20) * 0.05 + (random() - 0.5) * 0.001 end
+        if r == 4 then return 0.5 + (random(0, 19) + 0.5) * 0.05 end -- halfway between steps
+        if r == 5 then return pick({ 0.5, 1.5, 0.4999999, 1.5000001, 0.525, 0.575 }) end
+        if r == 6 then return (random() < 0.5 and -1 or 1) * 10 ^ random(2, 300) end
+        return random(-5, 5)
+    end
+
+    for i = 1, ITERATIONS do
+        local v = genFinite()
+        local ctx = "(v=" .. show(v) .. ")"
+        local s = UI.SnapScale(v)
+        local clamped = math.min(math.max(v, 0.5), 1.5)
+        assert(math.abs(s - clamped) <= UI.SCALE_STEP / 2 + 1e-9,
+            "result " .. show(s) .. " too far from clamped input " .. show(clamped) .. " " .. ctx)
+        local n = (s - 0.5) / 0.05
+        assert(math.abs(n - math.floor(n + 0.5)) <= 1e-9, "result off the grid " .. show(s) .. " " .. ctx)
+        if v < 0.5 then assert(s == 0.5, "below range gave " .. show(s) .. " " .. ctx) end
+        if v > 1.5 then assert(s == 1.5, "above range gave " .. show(s) .. " " .. ctx) end
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: options-panel, Property 3: Slider offset mapping round trip
+-- Validates: Requirements 3.1, 3.12
+----------------------------------------------------------------------
+property("Feature: options-panel, Property 3: Slider offset mapping round trip", function()
+    local UI = loadUI({})
+    local nan = 0 / 0
+
+    for i = 1, ITERATIONS do
+        -- Good width: result equals the snapped linear mapping.
+        local width = random(1, 1000)
+        local offset = -width + random() * 3 * width
+        if random() < 0.1 then offset = 0 end
+        local ctx = "(offset=" .. show(offset) .. ", width=" .. show(width) .. ")"
+        local got = UI.SliderValueFromOffset(offset, width)
+        local want = UI.SnapScale(0.5 + offset / width)
+        assert(got == want, "mapping " .. show(got) .. " ~= " .. show(want) .. " " .. ctx)
+        assert(UI.IsValidScale(got), "mapping result invalid " .. show(got) .. " " .. ctx)
+
+        -- Each grid value maps back to itself through its own offset.
+        local g = UI.SnapScale(0.5 + random(0, 20) * 0.05)
+        local gOffset = (g - 0.5) * width
+        local back = UI.SliderValueFromOffset(gOffset, width)
+        assert(back == g, "grid " .. show(g) .. " round-tripped to " .. show(back) .. " (width=" .. show(width) .. ")")
+
+        -- Bad width gives the default scale.
+        local bad = pick({ 0, -random(1, 1000), nan, math.huge, -math.huge })
+        local badGot = UI.SliderValueFromOffset(offset, bad)
+        assert(badGot == UI.DEFAULT_SCALE,
+            "bad width " .. show(bad) .. " gave " .. show(badGot) .. " " .. ctx)
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: options-panel, Property 4: Slider write and read round trip
+-- Validates: Requirements 4.1, 4.3, 4.7, 4.8, 4.9
+----------------------------------------------------------------------
+property("Feature: options-panel, Property 4: Slider write and read round trip", function()
+    local UI = loadUI({})
+    local nan = 0 / 0
+
+    local function deepEqual(a, b)
+        if type(a) ~= type(b) then return false end
+        if type(a) ~= "table" then return a == b or (a ~= a and b ~= b) end
+        for k, v in pairs(a) do
+            if not deepEqual(v, b[k]) then return false end
+        end
+        for k in pairs(b) do
+            if a[k] == nil then return false end
+        end
+        return true
+    end
+
+    local function deepCopy(v)
+        if type(v) ~= "table" then return v end
+        local c = {}
+        for k, x in pairs(v) do c[k] = deepCopy(x) end
+        return c
+    end
+
+    local function genRaw()
+        local r = random(10)
+        if r == 1 then return -1 + random() * 4 end
+        if r == 2 then return 0.5 + random(0, 20) * 0.05 end
+        if r == 3 then return 0.5 + random(0, 20) * 0.05 + (random() - 0.5) * 0.001 end
+        if r == 4 then return pick({ 0.5, 1.5, 0.85, 0.4999999, 1.5000001 }) end
+        if r == 5 then return (random() < 0.5 and -1 or 1) * 10 ^ random(6, 300) end
+        if r == 6 then return nan end
+        if r == 7 then return pick({ math.huge, -math.huge }) end
+        if r == 8 then return pick({ "0.85", "", "abc" }) end
+        if r == 9 then return pick({ true, false, {} }) end
+        return random(-5, 5)
+    end
+
+    local function genDb()
+        local db = {}
+        if random() < 0.7 then db.window = { point = "TOPLEFT", left = random(0, 2000), top = random(0, 2000) } end
+        if random() < 0.7 then db.checkedGames = { [random(1, 50)] = true, ["g" .. random(1, 9)] = false } end
+        if random() < 0.5 then db.showPlayerCounts = random() < 0.5 end
+        if random() < 0.3 then db.debug = random() < 0.5 end
+        for _ = 1, random(0, 4) do db["extra" .. random(1, 20)] = pick({ 1, "x", true, {} }) end
+        if random() < 0.4 then db.windowScale = pick({ 0.5, 1.2, 99, -1, "bad", true }) end
+        return db
+    end
+
+    for i = 1, ITERATIONS do
+        local db = genDb()
+        local raw = genRaw()
+        local hadScale = db.windowScale ~= nil
+        local before = deepCopy(db)
+        before.windowScale = nil
+        local ctx = "(raw=" .. show(raw) .. ")"
+
+        local snapped = UI.SnapScale(raw)
+        assert(UI.WriteScale(db, snapped) == true, "WriteScale refused snapped value " .. show(snapped) .. " " .. ctx)
+        assert(UI.ReadScale(db) == snapped, "ReadScale " .. show(UI.ReadScale(db)) .. " ~= " .. show(snapped) .. " " .. ctx)
+
+        local after = deepCopy(db)
+        after.windowScale = nil
+        assert(deepEqual(before, after), "fields other than windowScale changed " .. ctx)
+
+        -- A db without windowScale has none before the write (reads give the default).
+        if not hadScale then
+            local fresh = deepCopy(before)
+            assert(fresh.windowScale == nil, "fresh db has windowScale")
+            assert(UI.ReadScale(fresh) == UI.DEFAULT_SCALE, "fresh db did not read default")
+            assert(fresh.windowScale == nil, "ReadScale wrote to db")
+        end
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: options-panel, Property 5: Count setting round trip, default, and isolation
+-- Validates: Requirements 5.1, 5.2, 5.3, 5.4, 5.5, 5.9
+----------------------------------------------------------------------
+property("Feature: options-panel, Property 5: Count setting round trip, default, and isolation", function()
+    local UI = loadUI({})
+    local nan = 0 / 0
+
+    local function deepEqual(a, b)
+        if type(a) ~= type(b) then return false end
+        if type(a) ~= "table" then return a == b or (a ~= a and b ~= b) end
+        for k, v in pairs(a) do
+            if not deepEqual(v, b[k]) then return false end
+        end
+        for k in pairs(b) do
+            if a[k] == nil then return false end
+        end
+        return true
+    end
+
+    local function deepCopy(v)
+        if type(v) ~= "table" then return v end
+        local c = {}
+        for k, x in pairs(v) do c[k] = deepCopy(x) end
+        return c
+    end
+
+    local function genNonBoolean()
+        local r = random(8)
+        if r == 1 then return random(-5, 5) end
+        if r == 2 then return random() * 100 end
+        if r == 3 then return pick({ "true", "false", "", "abc" }) end
+        if r == 4 then return {} end
+        if r == 5 then return nan end
+        if r == 6 then return pick({ math.huge, -math.huge }) end
+        if r == 7 then return function() end end
+        return nil
+    end
+
+    local function genDb()
+        local db = {}
+        if random() < 0.7 then db.window = { point = "TOPLEFT", left = random(0, 2000), top = random(0, 2000) } end
+        if random() < 0.7 then db.checkedGames = { [random(1, 50)] = true, ["g" .. random(1, 9)] = false } end
+        if random() < 0.5 then db.windowScale = pick({ 0.5, 0.85, 1.2, 99, "bad" }) end
+        if random() < 0.3 then db.debug = random() < 0.5 end
+        for _ = 1, random(0, 4) do db["extra" .. random(1, 20)] = pick({ 1, "x", true, {} }) end
+        local r = random(3)
+        if r == 1 then db.showPlayerCounts = random() < 0.5
+        elseif r == 2 then db.showPlayerCounts = genNonBoolean() end
+        return db
+    end
+
+    for i = 1, ITERATIONS do
+        local db = genDb()
+        local b = random() < 0.5
+        local ctx = "(b=" .. show(b) .. ", stored=" .. show(db.showPlayerCounts) .. ")"
+
+        -- Boolean round trip; every other field is unchanged.
+        local before = deepCopy(db)
+        before.showPlayerCounts = nil
+        assert(UI.WriteShowCounts(db, b) == true, "WriteShowCounts refused boolean " .. ctx)
+        assert(UI.ReadShowCounts(db) == b, "ReadShowCounts did not return " .. show(b) .. " " .. ctx)
+        local after = deepCopy(db)
+        after.showPlayerCounts = nil
+        assert(deepEqual(before, after), "fields other than showPlayerCounts changed " .. ctx)
+
+        -- A nil or non-boolean stored value reads as true and the read does not write.
+        local bad = genDb()
+        local stored = genNonBoolean()
+        bad.showPlayerCounts = stored
+        local badBefore = deepCopy(bad)
+        local sctx = "(stored=" .. show(stored) .. ")"
+        assert(UI.ReadShowCounts(bad) == true, "non-boolean stored value did not read true " .. sctx)
+        assert(deepEqual(badBefore, bad), "ReadShowCounts changed the db " .. sctx)
+
+        -- A non-boolean write returns false and changes nothing.
+        local value = genNonBoolean()
+        local wctx = "(value=" .. show(value) .. ")"
+        local target = genDb()
+        local targetBefore = deepCopy(target)
+        assert(UI.WriteShowCounts(target, value) == false, "WriteShowCounts accepted non-boolean " .. wctx)
+        assert(deepEqual(targetBefore, target), "failed WriteShowCounts changed the db " .. wctx)
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: options-panel, Property 6: Header text with and without the count
+-- Validates: Requirements 6.1, 6.2, 6.7, 6.9
+----------------------------------------------------------------------
+property("Feature: options-panel, Property 6: Header text with and without the count", function()
+    local UI = loadUI({})
+
+    local function genText()
+        local r = random(4)
+        if r == 1 then
+            return pick({ "", " ", "(", ")", "(3)", "World of Warcraft", "Diablo 3", "Caf\195\169",
+                "\227\131\135\227\130\163\227\130\162\227\131\150\227\131\173", "|cff00ff00x|r", "Game 2", "x (12)", "[id: 7]" })
+        end
+        local parts = {}
+        for _ = 1, random(0, 8) do
+            parts[#parts + 1] = pick({ "a", "Z", " ", "(", ")", "0", "9", "\195\169", "\226\130\172", "|", "[", "]", ":" })
+        end
+        if r == 3 then parts[#parts + 1] = tostring(random(0, 999)) end
+        if r == 4 then parts[#parts + 1] = " (" .. random(0, 99) end
+        return table.concat(parts)
+    end
+
+    for i = 1, ITERATIONS do
+        local label, debugId = genText(), genText()
+        local count = pick({ 0, 1, 1000000, random(0, 1000000) })
+        local ctx = "(label=" .. show(label) .. ", debugId=" .. show(debugId) .. ", count=" .. count .. ")"
+
+        local withCount = UI.FormatHeader(label, debugId, count, true)
+        local without = UI.FormatHeader(label, debugId, count, false)
+
+        assert(withCount == label .. debugId .. " (" .. count .. ")", "true result wrong " .. ctx .. " got " .. show(withCount))
+        assert(without == label .. debugId, "false result wrong " .. ctx .. " got " .. show(without))
+        assert(withCount:sub(1, #without) == without, "false result is not a prefix of true result " .. ctx)
     end
 end)
 

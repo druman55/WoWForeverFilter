@@ -31,6 +31,19 @@ SlashCmdList["FOREVERFILTER"] = function(msg)
         end
         return
     end
+    if cmd == "reset" then
+        if ns.UI and ns.UI.ResetPosition then
+            ns.UI.ResetPosition()
+        end
+        return
+    end
+    local scaleArg = (cmd == "scale") and "" or cmd:match("^scale%s+(.*)$")
+    if scaleArg then
+        if ns.UI and ns.UI.HandleScaleCommand then
+            ns.UI.HandleScaleCommand(scaleArg)
+        end
+        return
+    end
     if ns.UI and ns.UI.Toggle then
         ns.UI.Toggle()
     end
