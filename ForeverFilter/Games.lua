@@ -54,6 +54,10 @@ function Games.GetGameName(game, projectID)
     return GAME_NAMES[game] or (game:gsub("|", "||"))
 end
 
+-- Sentinel for the combined Battle.net apps row (same value as Friends.APPS_GAME).
+-- It is named "Battle.net" and uses the icon of "App".
+GAME_NAMES["@apps"] = "Battle.net"
+
 local function nonEmpty(s)
     return type(s) == "string" and s ~= ""
 end
@@ -64,6 +68,9 @@ end
 function Games.GetIconMarkup(game, size, subIcon)
     if type(game) ~= "string" or game == "" then
         return nil, false
+    end
+    if game == "@apps" then
+        game = "App"
     end
     size = tonumber(size) or 14
     if not nonEmpty(subIcon) then

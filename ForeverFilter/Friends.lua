@@ -55,6 +55,74 @@ local function compareEntries(a, b)
     return (a.game or "") < (b.game or "")
 end
 
+-- Sentinel game value for friends who are online only in a Battle.net app.
+Friends.APPS_GAME = "@apps"
+
+-- True iff code is a Battle.net app client code.
+function Friends.IsAppClient(code)
+    return code == "App" or code == "BSAp" or code == "CLNT"
+end
+
+local function isOnlineInfo(info)
+    return type(info) == "table" and info.isOnline == true
+end
+
+-- Picks the online game accounts that count for presence: every online
+-- Real_Game account when any exists, else the first online App_Client account.
+local function selectFrom(infos)
+    local real, firstApp = {}, nil
+    for _, info in ipairs(infos) do
+        if isOnlineInfo(info) then
+            if Friends.IsAppClient(info.clientProgram) then
+                firstApp = firstApp or info
+            else
+                real[#real + 1] = info
+            end
+        end
+    end
+    if #real > 0 then
+        return real
+    end
+    if firstApp then
+        return { firstApp }
+    end
+    return {}
+end
+
+-- gameInfos: list of game account infos (nil and non-table entries tolerated).
+-- primaryInfo: the account's primary game account info, used only when no
+-- entry of gameInfos is online. Returns the infos that count, in input order.
+function Friends.PresenceGames(gameInfos, primaryInfo)
+    local list = {}
+    if type(gameInfos) == "table" then
+        -- Tolerate holes from nil entries.
+        local max = 0
+        for k in pairs(gameInfos) do
+            if type(k) == "number" and k > max then
+                max = k
+            end
+        end
+        for i = 1, max do
+            list[#list + 1] = gameInfos[i]
+        end
+    end
+
+    local anyOnline = false
+    for _, info in ipairs(list) do
+        if isOnlineInfo(info) then
+            anyOnline = true
+            break
+        end
+    end
+    if anyOnline then
+        return selectFrom(list)
+    end
+    if isOnlineInfo(primaryInfo) then
+        return selectFrom({ primaryInfo })
+    end
+    return {}
+end
+
 -- Returns a list of entries: one per online game account, or one offline
 -- entry (game = nil) per friend with no online game account.
 function Friends.GetAll()
@@ -65,24 +133,23 @@ function Friends.GetAll()
         local info = C_BattleNet and C_BattleNet.GetFriendAccountInfo(index)
         if info then
             local name = displayName(info)
-            local added = false
             local numAccounts = C_BattleNet.GetFriendNumGameAccounts(index) or 0
 
+            local gameInfos = {}
             for gameIndex = 1, numAccounts do
-                local gameInfo = C_BattleNet.GetFriendGameAccountInfo(index, gameIndex)
-                if gameInfo and gameInfo.isOnline then
-                    entries[#entries + 1] = makeOnlineEntry(name, gameInfo)
-                    added = true
+                gameInfos[gameIndex] = C_BattleNet.GetFriendGameAccountInfo(index, gameIndex)
+            end
+
+            local present = Friends.PresenceGames(gameInfos, info.gameAccountInfo)
+            for _, gameInfo in ipairs(present) do
+                local entry = makeOnlineEntry(name, gameInfo)
+                if Friends.IsAppClient(gameInfo.clientProgram) then
+                    entry.game = Friends.APPS_GAME
                 end
+                entries[#entries + 1] = entry
             end
 
-            -- Fall back to the primary game account if the list gave nothing.
-            if not added and info.gameAccountInfo and info.gameAccountInfo.isOnline then
-                entries[#entries + 1] = makeOnlineEntry(name, info.gameAccountInfo)
-                added = true
-            end
-
-            if not added then
+            if #present == 0 then
                 entries[#entries + 1] = {
                     name = name,
                     isOnline = false,
@@ -111,6 +178,21 @@ function Friends.CountByGame(entries)
         end
     end
     return counts
+end
+
+-- Number of entries with isOnline ~= true. GetAll makes one such entry per
+-- friend that has no online game account.
+function Friends.CountOffline(entries)
+    if type(entries) ~= "table" then
+        return 0
+    end
+    local count = 0
+    for _, entry in ipairs(entries) do
+        if type(entry) == "table" and entry.isOnline ~= true then
+            count = count + 1
+        end
+    end
+    return count
 end
 
 -- Groups online entries by (game, wowProjectID). Returns a list of

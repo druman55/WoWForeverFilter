@@ -9,3 +9,4 @@ Core.lua
 Friends.lua
 Games.lua
 UI.lua
+Filter.lua

@@ -45,6 +45,17 @@ local function loadFriends(ns)
     return ns.Friends, ns
 end
 
+-- Loads Friends.lua then UI.lua into one ns (the .toc order), so UI.FriendGameKeys
+-- can resolve ns.Friends.PresenceGames. Returns UI, ns, Friends.
+local function loadUIWithFriends(db)
+    local ns = { db = db }
+    loadModule("Friends", ns)
+    local chunk, err = loadfile("ForeverFilter/UI.lua")
+    if not chunk then error("cannot load ForeverFilter/UI.lua: " .. tostring(err)) end
+    chunk("ForeverFilter", ns)
+    return ns.UI, ns, ns.Friends
+end
+
 local function loadGames(ns)
     ns = loadModule("Games", ns)
     return ns.Games, ns
@@ -1148,7 +1159,9 @@ property("Feature: game-list-polish, Example tests: UI.Refresh sizing, anchoring
         -- Requirement 2.1/2.3: one SetHeight with the computed height.
         local heights = callsOf(mainFrame, "SetHeight")
         assert(#heights == 1, "SetHeight called " .. #heights .. " times")
-        assert(heights[1][2] == fiveRows, "SetHeight(" .. tostring(heights[1][2]) .. ") ~= " .. fiveRows)
+        -- friends-list-filter 5.1: five game rows plus the Offline row (24 + 6 gap) and the 7 px divider.
+        local withOffline = fiveRows + 24 + 6 + 7
+        assert(heights[1][2] == withOffline, "SetHeight(" .. tostring(heights[1][2]) .. ") ~= " .. withOffline)
 
         -- Requirement 2.5: re-anchored by TOPLEFT after the height change.
         local points = callsOf(mainFrame, "SetPoint")
@@ -1200,13 +1213,14 @@ property("Feature: game-list-polish, Example tests: UI.Refresh sizing, anchoring
         local p2 = callsOf(mainFrame, "SetPoint")
         assert(p2[#p2] and p2[#p2][2] == "TOPLEFT", "second Refresh: not re-anchored with TOPLEFT")
 
-        -- Requirement 6.3: empty state uses the minimum width (15% of 1920 = 288).
+        -- friends-list-filter 5.1: with no friends only the Offline row remains, sized like any row
+        -- (the stub string width is 400.2, so the width is 487 instead of the old empty-state 288).
         entries = {}
         ns.Friends.GetAll = function() return entries end
         mainFrame.calls = {}
         UI.Refresh()
         local w3 = callsOf(mainFrame, "SetWidth")
-        assert(#w3 == 1 and w3[1][2] == 288, "empty state width is " .. tostring(w3[1] and w3[1][2]))
+        assert(#w3 == 1 and w3[1][2] == 487, "offline-only width is " .. tostring(w3[1] and w3[1][2]))
         local p3 = callsOf(mainFrame, "SetPoint")
         assert(p3[#p3] and p3[#p3][2] == "TOPLEFT", "empty state: not re-anchored with TOPLEFT")
         assert(#callsOf(mainFrame, "SetSize") == 0, "empty state: SetSize was called")
@@ -2153,7 +2167,8 @@ local function wiringEnv(winW, winH)
 
     -- Text/text: so checkbox label code falls back to CreateFontString; CloseButton is set per test.
     local absent = { TitleText = true, TitleContainer = true, InsetBg = true,
-                     Text = true, text = true, Low = true, High = true, CloseButton = true }
+                     Text = true, text = true, Low = true, High = true, CloseButton = true,
+                     offline = true }  -- row checkbox field; nil on game rows as in the client
     local newFrame
     local function runHooks(self, name)
         local hs = rawget(self, "hooks")
@@ -3341,6 +3356,2157 @@ property("Feature: options-panel, Example tests: checkbox, reset button, labels 
         assert(optDeepEqual(db.checkedGames, games), "reset changed checkedGames")
         assert(ctx.refreshCount() > r0, "reset did not refresh")
     end)
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 1: Hiding nothing returns the input
+-- Validates: Requirements 1.3, 2.6, 9.7
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 1: Hiding nothing returns the input", function()
+    local UI = loadUI({})
+    local kinds = { "bnet", "wow", "divider", "invite_header", "invite", "spacer" }
+    local function isDivider(e) return e.kind == "divider" end
+
+    for i = 1, ITERATIONS do
+        local input = {}
+        for j = 1, random(0, 40) do
+            -- Bias toward dividers so leading, trailing, and repeated ones occur.
+            local kind = (random() < 0.3) and "divider" or pick(kinds)
+            input[j] = { kind = kind, id = j }
+        end
+        local snapshot = {}
+        for j, e in ipairs(input) do snapshot[j] = e end
+
+        local calls = 0
+        local kept, hidden = UI.FilterElements(input, function() calls = calls + 1; return false end, isDivider)
+
+        assert(hidden == 0, "iteration " .. i .. ": hidden count " .. tostring(hidden))
+        assert(#kept == #input, "iteration " .. i .. ": length " .. #kept .. " vs " .. #input)
+        for j = 1, #input do
+            assert(kept[j] == input[j], "iteration " .. i .. ": element " .. j .. " differs")
+        end
+        assert(kept ~= input, "iteration " .. i .. ": input list returned, not a copy")
+        assert(#input == #snapshot, "iteration " .. i .. ": input mutated")
+        for j = 1, #snapshot do
+            assert(input[j] == snapshot[j], "iteration " .. i .. ": input mutated at " .. j)
+        end
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 2: Filter keeps exactly the visible elements, in order
+-- Validates: Requirements 3.3, 3.4, 5.4, 7.3, 9.6, 9.9, 10.13
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 2: Filter keeps exactly the visible elements, in order", function()
+    local UI = loadUI({})
+    local kinds = { "bnet", "wow", "divider", "invite_header", "invite", "spacer" }
+    local function isDivider(e) return e.kind == "divider" end
+
+    for i = 1, ITERATIONS do
+        local input = {}
+        for j = 1, random(0, 40) do
+            local kind = (random() < 0.3) and "divider" or pick(kinds)
+            input[j] = { kind = kind, id = j }
+        end
+
+        -- Deterministic predicate from element id; mode 1 hides everything.
+        local mode = random(1, 3)
+        local hideSet = {}
+        for j = 1, #input do
+            hideSet[j] = (mode == 1) or (mode == 2 and random() < 0.5) or (mode == 3 and random() < 0.2)
+        end
+        local function shouldHide(e) return hideSet[e.id] == true end
+
+        local kept, hidden = UI.FilterElements(input, shouldHide, isDivider)
+
+        -- Every kept element is an input element, and order is preserved.
+        local last = 0
+        for k, e in ipairs(kept) do
+            assert(type(e) == "table" and input[e.id] == e, "iteration " .. i .. ": kept " .. k .. " not an input element")
+            assert(e.id > last, "iteration " .. i .. ": order broken at " .. k)
+            last = e.id
+            if not isDivider(e) then
+                assert(not shouldHide(e), "iteration " .. i .. ": kept hidden element " .. e.id)
+            end
+        end
+
+        -- Every non-divider that is not hidden is kept.
+        local keptById = {}
+        for _, e in ipairs(kept) do keptById[e.id] = true end
+        local expectedHidden = 0
+        for j, e in ipairs(input) do
+            if not isDivider(e) then
+                if shouldHide(e) then
+                    expectedHidden = expectedHidden + 1
+                else
+                    assert(keptById[j], "iteration " .. i .. ": visible element " .. j .. " dropped")
+                end
+            end
+        end
+        assert(hidden == expectedHidden, "iteration " .. i .. ": hidden " .. tostring(hidden) .. " vs " .. expectedHidden)
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 3: Filtering is idempotent
+-- Validates: Requirements 9.8
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 3: Filtering is idempotent", function()
+    local UI = loadUI({})
+    local kinds = { "bnet", "wow", "divider", "invite_header", "invite", "spacer" }
+    local function isDivider(e) return e.kind == "divider" end
+
+    for i = 1, ITERATIONS do
+        local input = {}
+        for j = 1, random(0, 40) do
+            local kind = (random() < 0.3) and "divider" or pick(kinds)
+            input[j] = { kind = kind, id = j }
+        end
+
+        local mode = random(1, 4)
+        local hideSet = {}
+        for j = 1, #input do
+            hideSet[j] = (mode == 1) or (mode == 2 and random() < 0.5) or (mode == 3 and random() < 0.2)
+        end
+        local function shouldHide(e) return hideSet[e.id] == true end
+
+        local once = UI.FilterElements(input, shouldHide, isDivider)
+        local twice, hiddenAgain = UI.FilterElements(once, shouldHide, isDivider)
+
+        assert(hiddenAgain == 0, "iteration " .. i .. ": second pass hid " .. tostring(hiddenAgain))
+        assert(#twice == #once, "iteration " .. i .. ": length " .. #twice .. " vs " .. #once)
+        for j = 1, #once do
+            assert(twice[j] == once[j], "iteration " .. i .. ": element " .. j .. " differs")
+        end
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 4: Dividers are tidy after hiding
+-- Validates: Requirements 7.1, 7.2, 9.5
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 4: Dividers are tidy after hiding", function()
+    local UI = loadUI({})
+    local kinds = { "bnet", "wow", "invite_header", "invite", "spacer" }
+    local function isDivider(e) return e.kind == "divider" end
+
+    for i = 1, ITERATIONS do
+        local input = {}
+        for j = 1, random(1, 40) do
+            local kind = (random() < 0.3) and "divider" or pick(kinds)
+            input[j] = { kind = kind, id = j }
+        end
+        -- Guarantee at least one non-divider so the predicate can hide something.
+        local nonDividers = {}
+        for j, e in ipairs(input) do
+            if not isDivider(e) then nonDividers[#nonDividers + 1] = j end
+        end
+        if #nonDividers == 0 then
+            input[#input + 1] = { kind = pick(kinds), id = #input + 1 }
+            nonDividers[1] = #input
+        end
+
+        local mode = random(1, 3)
+        local hideSet = {}
+        for j = 1, #input do
+            hideSet[j] = (mode == 1) or (mode == 2 and random() < 0.5) or (mode == 3 and random() < 0.2)
+        end
+        hideSet[nonDividers[random(1, #nonDividers)]] = true
+        local function shouldHide(e) return hideSet[e.id] == true end
+
+        local kept, hidden = UI.FilterElements(input, shouldHide, isDivider)
+        assert(hidden > 0, "iteration " .. i .. ": nothing hidden")
+
+        for k, e in ipairs(kept) do
+            if isDivider(e) then
+                assert(k > 1, "iteration " .. i .. ": divider is first")
+                assert(k < #kept, "iteration " .. i .. ": divider is last")
+                assert(not isDivider(kept[k - 1]), "iteration " .. i .. ": adjacent dividers at " .. k)
+                assert(not isDivider(kept[k + 1]), "iteration " .. i .. ": adjacent dividers at " .. k)
+            end
+        end
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 5: Online friend decision
+-- Validates: Requirements 2.1, 2.2, 9.1, 9.2, 9.3, 9.4
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 5: Online friend decision", function()
+    local UI = loadUI({})
+    local keys = { "WoW", "D3", "Pro", "S2", "BSAp", "ANBS", "x" }
+    local junk = { 0, 1, "yes", {}, function() end }
+
+    for i = 1, ITERATIONS do
+        -- friendGames: key list, empty list, nil, or non-table.
+        local friendGames
+        local r = random(1, 6)
+        if r == 1 then
+            friendGames = {}
+        elseif r == 2 then
+            friendGames = nil
+        elseif r == 3 then
+            friendGames = pick({ "WoW", 5, true, false })
+        else
+            friendGames = {}
+            for j = 1, random(1, 4) do friendGames[j] = pick(keys) end
+        end
+
+        -- isOnline: booleans (weighted toward true), nil, or other types.
+        local isOnline
+        local o = random(1, 6)
+        if o <= 3 then isOnline = true
+        elseif o == 4 then isOnline = false
+        elseif o == 5 then isOnline = nil
+        else isOnline = pick({ 0, 1, "true", {} }) end
+
+        -- isChecked backed by a random map: booleans, missing, non-boolean values.
+        local map = {}
+        for _, k in ipairs(keys) do
+            local m = random(1, 5)
+            if m == 1 or m == 2 then map[k] = false
+            elseif m == 3 then map[k] = true
+            elseif m == 4 then map[k] = pick(junk)
+            end
+        end
+        local function isChecked(key) return map[key] end
+
+        local expected = isOnline == true
+            and type(friendGames) == "table" and #friendGames > 0
+        if expected then
+            for _, k in ipairs(friendGames) do
+                if map[k] ~= false then expected = false break end
+            end
+        end
+
+        local actual = UI.ShouldHideFriend(friendGames, isOnline, isChecked)
+        assert(actual == expected, "iteration " .. i .. ": expected " .. tostring(expected)
+            .. " got " .. tostring(actual))
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 6: Offline friend decision
+-- Validates: Requirements 3.1, 10.11, 10.12, 10.14
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 6: Offline friend decision", function()
+    local UI = loadUI({})
+    local function gen()
+        local r = random(1, 6)
+        if r <= 2 then return true
+        elseif r <= 4 then return false
+        elseif r == 5 then return nil
+        else return pick({ 0, 1, "true", "false", {}, function() end }) end
+    end
+
+    for i = 1, ITERATIONS do
+        local isOnline, isChecked = gen(), gen()
+        local expected = isOnline ~= true and isChecked == false
+        local actual = UI.ShouldHideOfflineFriend(isOnline, isChecked)
+        assert(actual == expected, "iteration " .. i .. ": expected " .. tostring(expected)
+            .. " got " .. tostring(actual))
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 7: Element decision keeps what the filter must keep
+-- Validates: Requirements 3.3, 3.5, 4.3, 10.11, 10.12, 10.13, 10.15
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 7: Element decision keeps what the filter must keep", function()
+    local UI = loadUI({})
+    local keyPool = { "WoW", "D3", "Pro", "S2", "BSAp", "ANBS", "x" }
+    local junk = { 0, 1, "yes", {}, function() end }
+
+    for i = 1, ITERATIONS do
+        -- isBnetFriend: mostly true, sometimes false, nil, or another type.
+        local isBnetFriend
+        local b = random(1, 6)
+        if b <= 3 then isBnetFriend = true
+        elseif b == 4 then isBnetFriend = false
+        elseif b == 5 then isBnetFriend = nil
+        else isBnetFriend = pick({ 0, 1, "true", {} }) end
+
+        -- isOnline: true, false, or nil.
+        local isOnline = pick({ true, false, nil, true, false })
+
+        -- keys: key list, empty list, or nil.
+        local keys
+        local k = random(1, 5)
+        if k == 1 then keys = {}
+        elseif k == 2 then keys = nil
+        else
+            keys = {}
+            for j = 1, random(1, 4) do keys[j] = pick(keyPool) end
+        end
+
+        local map = {}
+        for _, key in ipairs(keyPool) do
+            local m = random(1, 5)
+            if m == 1 or m == 2 then map[key] = false
+            elseif m == 3 then map[key] = true
+            elseif m == 4 then map[key] = pick(junk)
+            end
+        end
+        local function isChecked(key) return map[key] end
+
+        local offlineChecked
+        local oc = random(1, 4)
+        if oc == 1 or oc == 2 then offlineChecked = false
+        elseif oc == 3 then offlineChecked = true
+        else offlineChecked = pick({ nil, 0, "no", {} }) end
+
+        local actual = UI.ShouldHideBnetElement(isBnetFriend, isOnline, keys, isChecked, offlineChecked)
+
+        local expected
+        if isBnetFriend ~= true then
+            expected = false
+        elseif isOnline == nil then
+            expected = false
+        elseif isOnline == true then
+            expected = UI.ShouldHideFriend(keys, true, isChecked)
+        else
+            expected = UI.ShouldHideOfflineFriend(false, offlineChecked)
+        end
+
+        assert(actual == expected, "iteration " .. i .. ": expected " .. tostring(expected)
+            .. " got " .. tostring(actual))
+        if isBnetFriend ~= true or isOnline == nil then
+            assert(actual == false, "iteration " .. i .. ": must keep non-bnet or unknown-state element")
+        end
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 8: Friend game keys match the window's grouping keys
+-- Validates: Requirements 2.3, 3.2
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 8: Friend game keys match the window's grouping keys", function()
+    local UI, _, Friends = loadUIWithFriends({})
+
+    local saved = {
+        BNGetNumFriends = BNGetNumFriends,
+        C_BattleNet = C_BattleNet,
+    }
+
+    local programs = { "WoW", "Pro", "D3", "BSAp", "App", "" }
+    local projectIDs = { 0, 1, 2, 5, 11 }
+
+    local function genAccount()
+        return {
+            isOnline = random() < 0.6,
+            clientProgram = pick(programs), -- nil when the pick lands on the extra slot
+            wowProjectID = pick(projectIDs),
+        }
+    end
+
+    local function genAccountMaybeNil()
+        local acc = genAccount()
+        if random(1, 7) == 1 then acc.clientProgram = nil end
+        if random(1, 6) == 1 then acc.wowProjectID = nil end
+        return acc
+    end
+
+    local function setOf(list)
+        local s, n = {}, 0
+        for _, k in ipairs(list) do
+            if not s[k] then s[k] = true; n = n + 1 end
+        end
+        return s, n
+    end
+
+    local ok, err = pcall(function()
+        for i = 1, ITERATIONS do
+            local accounts = {}
+            for j = 1, random(0, 5) do accounts[j] = genAccountMaybeNil() end
+            local primary = genAccountMaybeNil()
+
+            BNGetNumFriends = function() return 1 end
+            C_BattleNet = {
+                GetFriendAccountInfo = function() return { accountName = "F", gameAccountInfo = primary } end,
+                GetFriendNumGameAccounts = function() return #accounts end,
+                GetFriendGameAccountInfo = function(_, gameIndex) return accounts[gameIndex] end,
+            }
+
+            local keys = UI.FriendGameKeys(accounts, primary)
+
+            local expected = {}
+            local rows = Friends.GroupByGame(Friends.GetAll())
+            for _, row in ipairs(rows) do
+                expected[#expected + 1] = UI.GameKey(row.game, row.wowProjectID)
+            end
+
+            local keySet, keyCount = setOf(keys)
+            local expectedSet = setOf(expected)
+            assert(keyCount == #keys, "iteration " .. i .. ": duplicate keys in result")
+            for k in pairs(expectedSet) do
+                assert(keySet[k], "iteration " .. i .. ": missing key " .. tostring(k))
+            end
+            for k in pairs(keySet) do
+                assert(expectedSet[k], "iteration " .. i .. ": unexpected key " .. tostring(k))
+            end
+
+            -- Offline accounts contribute nothing: with no online account anywhere, no keys.
+            local anyOnline = primary.isOnline
+            for _, a in ipairs(accounts) do anyOnline = anyOnline or a.isOnline end
+            if not anyOnline then
+                assert(#keys == 0, "iteration " .. i .. ": keys from offline accounts")
+            end
+
+            -- Every key comes from an online account (list first, primary as fallback).
+            -- App accounts map to "@apps" and only count when no Real_Game is online.
+            local function keyOf(a)
+                local pid = a.wowProjectID
+                if not (type(pid) == "number" and pid > 0) then pid = nil end
+                local code = a.clientProgram ~= "" and a.clientProgram or nil
+                if Friends.IsAppClient(code) then return UI.APPS_KEY end
+                return UI.GameKey(code, pid)
+            end
+            local onlineKeys = {}
+            local sawOnlineInList = false
+            local sawRealGame = false
+            for _, a in ipairs(accounts) do
+                if a.isOnline then
+                    sawOnlineInList = true
+                    if keyOf(a) ~= UI.APPS_KEY then sawRealGame = true; onlineKeys[keyOf(a)] = true end
+                end
+            end
+            if not sawOnlineInList and primary.isOnline then
+                onlineKeys[keyOf(primary)] = true
+            elseif not sawRealGame then
+                for _, a in ipairs(accounts) do
+                    if a.isOnline then onlineKeys[keyOf(a)] = true; break end
+                end
+            end
+            for _, k in ipairs(keys) do
+                assert(onlineKeys[k], "iteration " .. i .. ": key " .. tostring(k) .. " not from an online account")
+            end
+        end
+    end)
+
+    BNGetNumFriends = saved.BNGetNumFriends
+    C_BattleNet = saved.C_BattleNet
+    assert(ok, err)
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 9: The Offline key never equals a game key
+--
+-- Validates: Requirements 10.17, 10.18
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 9: The Offline key never equals a game key", function()
+    local UI = loadUI({})
+    assert(UI.OFFLINE_KEY == "@offline", "unexpected OFFLINE_KEY " .. tostring(UI.OFFLINE_KEY))
+
+    local function genGame()
+        local r = random(6)
+        if r == 1 then return nil end
+        if r == 2 then return "" end
+        if r == 3 then return random(0, 1000) end
+        if r == 4 then return pick({ "WoW", "Pro", "D3", "BSAp", "App", "@offline", "offline", "@" }) end
+        if r == 5 then return pick({ "Dïablo", "ワールド", "魔兽世界", "ü€", "\xF0\x9F\x8E\xAE" }) end
+        local chars = {}
+        for j = 1, random(1, 10) do chars[j] = string.char(random(32, 126)) end
+        return table.concat(chars)
+    end
+    local function genProjectID()
+        local r = random(4)
+        if r == 1 then return nil end
+        if r == 2 then return pick({ 0, 1, 2, 5, 11 }) end
+        if r == 3 then return random(-1000, 1000) end
+        return pick({ "", "1", "@offline", "x" })
+    end
+
+    for i = 1, ITERATIONS do
+        local game, pid = genGame(), genProjectID()
+        local key = UI.GameKey(game, pid)
+        assert(key ~= UI.OFFLINE_KEY, "iteration " .. i .. ": GameKey(" .. tostring(game) .. ", "
+            .. tostring(pid) .. ") equals the Offline key")
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 10: Offline checked state round trip, default, and isolation
+--
+-- Validates: Requirements 1.4, 10.8, 10.9
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 10: Offline checked state round trip, default, and isolation", function()
+    local function deepEqual(a, b)
+        if type(a) ~= "table" or type(b) ~= "table" then return rawequal(a, b) end
+        for k, v in pairs(a) do if not deepEqual(v, b[k]) then return false end end
+        for k in pairs(b) do if a[k] == nil then return false end end
+        return true
+    end
+    local function deepCopy(v)
+        if type(v) ~= "table" then return v end
+        local c = {}
+        for k, x in pairs(v) do c[k] = deepCopy(x) end
+        return c
+    end
+    local function genNonBoolean()
+        local r = random(5)
+        if r == 1 then return random(-5, 5) end
+        if r == 2 then return genString() end
+        if r == 3 then return { random(1, 3), nested = { random(1, 3) } } end
+        if r == 4 then return function() end end
+        return random() + 0.5
+    end
+    local function genValue()
+        if random() < 0.5 then return random() < 0.5 end
+        return genNonBoolean()
+    end
+
+    for i = 1, ITERATIONS do
+        local store = genStore()
+        for _ = 1, random(0, 4) do store[genString() .. ":" .. random(0, 20)] = genValue() end
+        local mode = random(3)
+        local hasEntry = mode ~= 1
+        if mode == 2 then store["@offline"] = genNonBoolean()
+        elseif mode == 3 then store["@offline"] = random() < 0.5 end
+        local db = { checkedGames = store }
+        for _ = 1, random(0, 3) do db["extra" .. random(1, 9)] = genValue() end
+
+        local UI = loadUI(db)
+        local before = deepCopy(store)
+        local dbBefore = deepCopy(db)
+        local stored = before["@offline"]
+
+        -- Default: missing or non-boolean reads as true; the read adds no entry and changes nothing.
+        local expected = true
+        if type(stored) == "boolean" then expected = stored end
+        local got = UI.IsOfflineChecked()
+        assert(got == expected, string.format("iteration %d: IsOfflineChecked with stored %s: got %s, expected %s",
+            i, tostring(stored), tostring(got), tostring(expected)))
+        assert(deepEqual(store, before), "iteration " .. i .. ": IsOfflineChecked changed checkedGames")
+        assert(hasEntry or store["@offline"] == nil, "iteration " .. i .. ": IsOfflineChecked added an entry")
+
+        -- Round trip and isolation.
+        local b = random() < 0.5
+        UI.SetOfflineChecked(b)
+        assert(UI.IsOfflineChecked() == b, "iteration " .. i .. ": round trip returned the wrong value")
+        assert(store["@offline"] == b and type(store["@offline"]) == "boolean",
+            "iteration " .. i .. ": stored value is not the boolean written")
+        for k, v in pairs(before) do
+            if k ~= "@offline" then
+                assert(deepEqual(store[k], v), "iteration " .. i .. ": other entry changed: " .. show(k))
+            end
+        end
+        for k in pairs(store) do
+            assert(k == "@offline" or before[k] ~= nil, "iteration " .. i .. ": unexpected new entry " .. show(k))
+        end
+        for k, v in pairs(dbBefore) do
+            if k ~= "checkedGames" then
+                assert(deepEqual(db[k], v), "iteration " .. i .. ": db field changed: " .. show(k))
+            end
+        end
+
+        -- Every value written is a boolean: toggling back also stores a boolean.
+        UI.SetOfflineChecked(not b)
+        assert(store["@offline"] == (not b), "iteration " .. i .. ": second write not stored")
+        assert(UI.IsOfflineChecked() == (not b))
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 11: The failure latch only moves toward disabled and announces once
+--
+-- Validates: Requirements 6.6
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 11: The failure latch only moves toward disabled and announces once", function()
+    local UI = loadUI({})
+    local events = { "apply", "error", "blocked", "other" }
+
+    for i = 1, ITERATIONS do
+        local n = random(0, 30)
+        local seq = {}
+        for k = 1, n do seq[k] = events[random(#events)] end
+
+        local state = { disabled = false, announced = false }
+        local announces, announceAt, firstFailure = 0, nil, nil
+        local wasDisabled = false
+        for k, ev in ipairs(seq) do
+            local before = { disabled = state.disabled, announced = state.announced }
+            local newState, action = UI.NextFilterGuard(state, ev)
+            assert(state.disabled == before.disabled and state.announced == before.announced,
+                "iteration " .. i .. ": input state was mutated at event " .. k)
+            assert(type(newState) == "table", "iteration " .. i .. ": no state returned at event " .. k)
+            state = newState
+
+            if (ev == "error" or ev == "blocked") and not firstFailure then firstFailure = k end
+            if action == "announce" then
+                announces = announces + 1
+                announceAt = announceAt or k
+            else
+                assert(action == nil, "iteration " .. i .. ": unexpected action " .. show(action) .. " at event " .. k)
+            end
+            if wasDisabled then
+                assert(state.disabled == true, "iteration " .. i .. ": latch re-enabled at event " .. k)
+            end
+            wasDisabled = state.disabled == true
+        end
+
+        assert((state.disabled == true) == (firstFailure ~= nil),
+            "iteration " .. i .. ": disabled is " .. tostring(state.disabled) .. " but first failure is " .. tostring(firstFailure))
+        assert(announces <= 1, "iteration " .. i .. ": announced " .. announces .. " times")
+        assert(announceAt == firstFailure,
+            "iteration " .. i .. ": announce at " .. tostring(announceAt) .. ", first failure at " .. tostring(firstFailure))
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 12: Offline count
+--
+-- Validates: Requirements 10.6
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 12: Offline count", function()
+    local Friends = loadFriends()
+    local values = { true, false, "nil" }
+
+    for i = 1, ITERATIONS do
+        local n = random(0, 40)
+        local entries, expected = {}, 0
+        for k = 1, n do
+            local v = pick(values)
+            if v == "nil" then v = nil end
+            entries[k] = { isOnline = v, name = "f" .. k }
+            if v ~= true then expected = expected + 1 end
+        end
+
+        local got = Friends.CountOffline(entries)
+        assert(got == expected,
+            "iteration " .. i .. ": CountOffline returned " .. show(got) .. ", expected " .. expected)
+
+        -- Fisher-Yates shuffle into a new list
+        local shuffled = {}
+        for k = 1, n do shuffled[k] = entries[k] end
+        for k = n, 2, -1 do
+            local j = random(k)
+            shuffled[k], shuffled[j] = shuffled[j], shuffled[k]
+        end
+        local got2 = Friends.CountOffline(shuffled)
+        assert(got2 == expected,
+            "iteration " .. i .. ": CountOffline after shuffle returned " .. show(got2) .. ", expected " .. expected)
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 14: The Offline divider is shown iff a game row exists
+--
+-- Validates: Requirements 10.4
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 14: The Offline divider is shown iff a game row exists", function()
+    local UI = loadUI({})
+
+    local function gen()
+        local r = random(7)
+        if r == 1 then return random(0, 1000)
+        elseif r == 2 then return -random(1, 1000)
+        elseif r == 3 then return nil
+        elseif r == 4 then return "str" .. random(0, 9)
+        elseif r == 5 then return random() < 0.5
+        elseif r == 6 then return {}
+        else return (random() - 0.5) * 100 end
+    end
+
+    local function check(v, label)
+        local expected = type(v) == "number" and v > 0
+        local got = UI.OfflineDividerVisible(v)
+        assert(got == expected,
+            label .. ": OfflineDividerVisible(" .. show(v) .. ") returned " .. show(got) .. ", expected " .. tostring(expected))
+    end
+
+    check(0, "edge"); check(1, "edge"); check(-1, "edge"); check(nil, "edge")
+    for i = 1, ITERATIONS do
+        check(gen(), "iteration " .. i)
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, example tests for the pure layer
+--
+-- Validates: Requirements 2.3, 3.2, 3.4, 3.5, 7.1, 10.8, 10.15, 10.17
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Example tests for the pure layer", function()
+    local UI = loadUIWithFriends({})
+    local function isDivider(e) return e == "div" end
+
+    -- Offline key
+    assert(UI.OFFLINE_KEY == "@offline", "unexpected OFFLINE_KEY " .. tostring(UI.OFFLINE_KEY))
+
+    -- Nothing hidden: a trailing divider built by Blizzard stays.
+    local kept, hidden = UI.FilterElements({ "a", "b", "div" }, function() return false end, isDivider)
+    assert(hidden == 0 and #kept == 3 and kept[3] == "div", "trailing divider not kept when nothing hidden")
+
+    -- Favorites-only list, its one friend hidden: the divider that follows is dropped.
+    kept, hidden = UI.FilterElements({ "fav", "div" }, function(e) return e == "fav" end, isDivider)
+    assert(hidden == 1 and #kept == 0, "divider after the hidden favorite was kept")
+    kept, hidden = UI.FilterElements({ "a", "fav", "div" }, function(e) return e == "fav" end, isDivider)
+    assert(hidden == 1 and #kept == 1 and kept[1] == "a", "trailing divider kept after hiding the last friend")
+
+    -- FriendState with nil accountInfo.
+    local isOnline, keys = UI.FriendState(nil, nil)
+    assert(isOnline == nil, "FriendState(nil) isOnline should be nil, got " .. show(isOnline))
+    assert(type(keys) == "table" and #keys == 0, "FriendState(nil) should return an empty key list")
+
+    -- FriendGameKeys for a friend online in the Battle.net app: the single key "@apps".
+    local appKeys = UI.FriendGameKeys({ { isOnline = true, clientProgram = "BSAp" } }, nil)
+    assert(#appKeys == 1 and appKeys[1] == "@apps", "BSAp key wrong: " .. show(appKeys[1]))
+    appKeys = UI.FriendGameKeys({ { isOnline = true, clientProgram = "App" } }, nil)
+    assert(#appKeys == 1 and appKeys[1] == "@apps", "App key wrong: " .. show(appKeys[1]))
+
+    -- IsOfflineChecked with junk: true, and the junk stays.
+    local junk = { "x" }
+    local UI2, ns2 = loadUI({ checkedGames = { ["@offline"] = junk } })
+    assert(UI2.IsOfflineChecked() == true, "junk in @offline should count as checked")
+    assert(rawequal(ns2.db.checkedGames["@offline"], junk), "junk in @offline was replaced")
+    local UI3, ns3 = loadUI({ checkedGames = { ["@offline"] = "no" } })
+    assert(UI3.IsOfflineChecked() == true and ns3.db.checkedGames["@offline"] == "no", "string junk mishandled")
+
+    -- Loading UI.lua creates no frames.
+    -- Only the bare event frame (no name, no template) may exist; no window or widgets.
+    local realCreateFrame, calls = CreateFrame, {}
+    CreateFrame = function(...) calls[#calls + 1] = { ... }; return realCreateFrame(...) end
+    local ok, err = pcall(loadUI, {})
+    CreateFrame = realCreateFrame
+    assert(ok, "UI.lua failed to load: " .. tostring(err))
+    for _, c in ipairs(calls) do
+        assert(c[1] == "Frame" and c[2] == nil and c[4] == nil,
+            "UI.lua created a window or widget at load time: " .. tostring(c[1]) .. " " .. tostring(c[2]))
+    end
+    assert(#calls <= 1, "UI.lua created " .. #calls .. " frames at load time")
+end)
+
+----------------------------------------------------------------------
+-- Loads UI.lua then Filter.lua into one ns. env may hold hooksecurefunc, CreateFrame,
+-- FriendsListFrame and SocialUIFrame; they become globals until the returned restore() runs.
+----------------------------------------------------------------------
+local function loadFilter(env)
+    env = env or {}
+    local names = { "hooksecurefunc", "CreateFrame", "FriendsListFrame", "SocialUIFrame" }
+    local saved = {}
+    for _, n in ipairs(names) do
+        saved[n] = _G[n]
+        if n == "CreateFrame" and env[n] == nil then
+            -- keep the harness stub
+        else
+            _G[n] = env[n]
+        end
+    end
+    local function restore()
+        for _, n in ipairs(names) do _G[n] = saved[n] end
+    end
+    local ns = { db = {} }
+    local ok, err = pcall(function()
+        for _, file in ipairs({ "Friends", "UI", "Filter" }) do
+            local chunk, lerr = loadfile("ForeverFilter/" .. file .. ".lua")
+            if not chunk then error("cannot load ForeverFilter/" .. file .. ".lua: " .. tostring(lerr)) end
+            chunk("ForeverFilter", ns)
+        end
+    end)
+    if not ok then restore(); error(err, 0) end
+    return ns.Filter, ns, restore
+end
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 13: Hook installation is idempotent
+--
+-- Validates: Requirements 6.8, 8.4
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 13: Hook installation is idempotent", function()
+    for i = 1, ITERATIONS do
+        local calls = {}
+        local function hook(target, method, fn)
+            calls[target] = (calls[target] or 0) + 1
+            assert(method == "SetDataProvider", "hooked unexpected method " .. show(method))
+            assert(type(fn) == "function", "hook callback is not a function")
+        end
+
+        -- Each ScrollBox: absent, present without SetDataProvider, or complete.
+        local function genScrollBox()
+            local r = random(3)
+            if r == 1 then return nil end
+            if r == 2 then return {} end
+            return { SetDataProvider = function() end }
+        end
+        local classicBox, socialBox = genScrollBox(), genScrollBox()
+        if classicBox and random() < 0.15 then socialBox = classicBox end -- shared table
+
+        local function genFrames()
+            local classic, social
+            local r = random(3)
+            if r > 1 then classic = { ScrollBox = classicBox } end
+            r = random(4)
+            if r == 2 then social = {}
+            elseif r > 2 then social = { FriendsList = r == 3 and {} or { ScrollBox = socialBox } } end
+            return classic, social
+        end
+
+        local classic, social = genFrames()
+        local env = {
+            hooksecurefunc = random() < 0.9 and hook or nil,
+            FriendsListFrame = classic,
+            SocialUIFrame = social,
+        }
+        local Filter, _, restore = loadFilter(env)
+        local ok, err = pcall(function()
+            for n = 1, random(1, 10) do
+                Filter.Install()
+                -- Frames may appear later, as when Blizzard_SocialUI loads on demand.
+                if random() < 0.3 then
+                    local c2, s2 = genFrames()
+                    _G.FriendsListFrame, _G.SocialUIFrame = c2 or _G.FriendsListFrame, s2 or _G.SocialUIFrame
+                end
+            end
+        end)
+        restore()
+        assert(ok, "iteration " .. i .. ": Install raised an error: " .. tostring(err))
+        for target, count in pairs(calls) do
+            assert(count == 1, "iteration " .. i .. ": hooksecurefunc called " .. count .. " times for one ScrollBox")
+        end
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Example tests: the classic hook
+--
+-- Validates: Requirements 1.1, 1.2, 1.3, 2.1, 2.2, 2.5, 2.6, 3.3, 3.4, 3.5, 4.1, 5.5, 5.6,
+-- 6.2, 6.6, 6.8, 8.3, 8.5, 10.11, 10.12, 10.13, 10.15
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Example tests: the classic hook", function()
+    local T_DIVIDER, T_WOW, T_BNET, T_INVITE_HEADER, T_INVITE = 1, 2, 3, 4, 5
+    local SECRET = {}
+    local globalNames = {
+        "print", "C_BattleNet", "FRIENDS_BUTTON_TYPE_DIVIDER", "FRIENDS_BUTTON_TYPE_WOW",
+        "FRIENDS_BUTTON_TYPE_BNET", "issecretvalue", "BNGetNumFriends", "BNRemoveFriend",
+        "BNSetFriendNote", "BNSetFriendFavorite", "FriendsList_Update",
+    }
+    local savedGlobals = {}
+    for _, n in ipairs(globalNames) do savedGlobals[n] = _G[n] end
+
+    -- Runs body(h) with a fresh Filter, stub frames, a Blizzard-style provider and recorders.
+    local function withHook(opts, body)
+        opts = opts or {}
+        local h = { printed = {}, counts = { bnGetNum = 0, mutate = 0, update = 0, friendInfo = 0 },
+                    scrollCalls = {}, hooks = {}, frames = {}, shown = true }
+        FRIENDS_BUTTON_TYPE_DIVIDER, FRIENDS_BUTTON_TYPE_WOW, FRIENDS_BUTTON_TYPE_BNET = T_DIVIDER, T_WOW, T_BNET
+        issecretvalue = function(v) return v == SECRET end
+        print = function(...) h.printed[#h.printed + 1] = table.concat({ ... }, " ") end
+        BNGetNumFriends = function() h.counts.bnGetNum = h.counts.bnGetNum + 1; return 5, 5 end
+        local function mutator() h.counts.mutate = h.counts.mutate + 1 end
+        BNRemoveFriend, BNSetFriendNote, BNSetFriendFavorite = mutator, mutator, mutator
+        FriendsList_Update = function() h.counts.update = h.counts.update + 1 end
+
+        -- friends[i] = { games = { {isOnline, clientProgram, wowProjectID}, ... }, primary = {...}, nilInfo = bool }
+        h.friends = {}
+        C_BattleNet = {
+            GetFriendAccountInfo = function(i)
+                h.counts.friendInfo = h.counts.friendInfo + 1
+                if h.throwOnInfo then error("boom") end
+                local f = h.friends[i]
+                if not f or f.nilInfo then return nil end
+                return { gameAccountInfo = f.primary or f.games[1] }
+            end,
+            GetFriendNumGameAccounts = function(i) return #h.friends[i].games end,
+            GetFriendGameAccountInfo = function(i, j) return h.friends[i].games[j] end,
+        }
+
+        -- Provider clone with Blizzard DataProvider semantics.
+        local function newProvider(list)
+            local p = { collection = {}, flushes = 0, inserts = 0 }
+            for i, e in ipairs(list) do p.collection[i] = e end
+            function p:GetCollection() return self.collection end
+            function p:GetSize() return #self.collection end
+            function p:Flush() self.flushes = self.flushes + 1; self.collection = {} end
+            function p:InsertTable(t)
+                self.inserts = self.inserts + 1
+                for _, e in ipairs(t) do self.collection[#self.collection + 1] = e end
+            end
+            return p
+        end
+        h.newProvider = newProvider
+
+        local scrollBox = setmetatable({}, { __index = function(_, name)
+            return function() h.scrollCalls[#h.scrollCalls + 1] = name end
+        end })
+        function scrollBox:SetDataProvider(p)
+            self.provider = p
+            for _, fn in ipairs(h.hooks) do fn(self, p) end -- post-hook, as hooksecurefunc does
+        end
+        function scrollBox:GetDataProvider() return self.provider end
+        h.scrollBox = scrollBox
+        -- Blizzard's call: a fresh provider is built and set on the ScrollBox.
+        function h.drive(p) scrollBox:SetDataProvider(p) end
+
+        local env = {
+            hooksecurefunc = function(target, method, fn)
+                assert(target == scrollBox and method == "SetDataProvider", "unexpected hook target")
+                h.hooks[#h.hooks + 1] = fn
+            end,
+            CreateFrame = function()
+                local f = { events = {}, scripts = {} }
+                function f:RegisterEvent(e) self.events[e] = true end
+                function f:SetScript(n, fn) self.scripts[n] = fn end
+                h.frames[#h.frames + 1] = f
+                return f
+            end,
+            FriendsListFrame = (not opts.noFrame) and {
+                ScrollBox = scrollBox, IsShown = function() return h.shown end,
+            } or nil,
+        }
+        local Filter, ns, restore = loadFilter(env)
+        h.Filter, h.ns, h.UI = Filter, ns, ns.UI
+        ns.db = { checkedGames = {} }
+        function h.fire(event, ...)
+            for _, f in ipairs(h.frames) do
+                if f.events[event] and f.scripts.OnEvent then f.scripts.OnEvent(f, event, ...) end
+            end
+        end
+        function h.setChecked(key, v) ns.db.checkedGames[key] = v end
+        function h.ids(list)
+            local out = {}
+            for i, e in ipairs(list) do out[i] = e.buttonType .. ":" .. tostring(e.id) end
+            return table.concat(out, ",")
+        end
+        Filter.Install()
+
+        local ok, err = pcall(body, h)
+        restore()
+        for _, n in ipairs(globalNames) do _G[n] = savedGlobals[n] end
+        if not ok then error(err, 0) end
+    end
+
+    local function d3Online() return { { isOnline = true, clientProgram = "D3" } } end
+    local function wowOnline() return { { isOnline = true, clientProgram = "WoW", wowProjectID = 1 } } end
+    local function setupList(h)
+        h.friends[1] = { games = d3Online() }
+        h.friends[2] = { games = wowOnline() }
+        h.friends[4] = { games = d3Online() }
+        local list = {
+            { buttonType = T_INVITE_HEADER, id = "h" }, { buttonType = T_INVITE, id = "i" },
+            { buttonType = T_DIVIDER, id = "d" },
+            { buttonType = T_BNET, id = 1 }, { buttonType = T_BNET, id = 2 },
+            { buttonType = T_WOW, id = 9 }, { buttonType = T_BNET, id = 4 },
+        }
+        return list, h.UI.GameKey("D3")
+    end
+
+    -- One unchecked game removes only its friends; the rest and the leading divider stay.
+    withHook({}, function(h)
+        local list, d3 = setupList(h)
+        local original = h.ids(list)
+        h.setChecked(d3, false)
+        local p = h.newProvider(list)
+        h.drive(p)
+        assert(h.ids(p:GetCollection()) == "4:h,5:i,1:d,3:2,2:9", "wrong result: " .. h.ids(p:GetCollection()))
+        assert(#h.scrollCalls == 0, "scroll method called during edit: " .. tostring(h.scrollCalls[1]))
+        assert(h.counts.bnGetNum == 0 and h.counts.mutate == 0, "BN stubs were touched")
+        assert(BNGetNumFriends() == 5, "BNGetNumFriends result changed")
+
+        -- Second hook call with the already filtered provider: same result, no further edits.
+        local flushes, inserts = p.flushes, p.inserts
+        h.drive(p)
+        assert(h.ids(p:GetCollection()) == "4:h,5:i,1:d,3:2,2:9", "second call changed the list")
+        assert(p.flushes == flushes and p.inserts == inserts, "second call edited the provider")
+
+        -- Check the game again: Reapply restores the original list.
+        h.setChecked(d3, true)
+        h.Filter.Reapply()
+        assert(h.ids(p:GetCollection()) == original, "Reapply did not restore: " .. h.ids(p:GetCollection()))
+        assert(#h.scrollCalls == 0, "scroll method called during Reapply")
+
+        -- Uncheck again, then hide the list frame: Reapply does nothing.
+        h.setChecked(d3, false)
+        h.shown = false
+        flushes, inserts = p.flushes, p.inserts
+        h.Filter.Reapply()
+        assert(p.flushes == flushes and p.inserts == inserts, "Reapply edited a hidden list")
+        assert(h.counts.update == 0, "FriendsList_Update was called")
+        h.shown = true
+        h.Filter.Reapply()
+        assert(h.ids(p:GetCollection()) == "4:h,5:i,1:d,3:2,2:9", "Reapply with shown list did not filter")
+        assert(h.counts.update == 0, "FriendsList_Update was called")
+    end)
+
+    -- Everything checked: no edit at all, content equals what Blizzard built.
+    withHook({}, function(h)
+        local list = setupList(h)
+        local original = h.ids(list)
+        local p = h.newProvider(list)
+        h.drive(p)
+        assert(p.flushes == 0 and p.inserts == 0, "provider edited with everything checked")
+        assert(h.ids(p:GetCollection()) == original, "content changed with everything checked")
+    end)
+
+    -- Unreadable data keeps the friend: nil account info and a secret value.
+    withHook({}, function(h)
+        local _, d3 = setupList(h)
+        h.friends[5] = { games = d3Online(), nilInfo = true }
+        h.friends[6] = { games = { { isOnline = true, clientProgram = SECRET } } }
+        h.setChecked(d3, false)
+        local p = h.newProvider({ { buttonType = T_BNET, id = 5 }, { buttonType = T_BNET, id = 6 }, { buttonType = T_BNET, id = 1 } })
+        h.drive(p)
+        assert(h.ids(p:GetCollection()) == "3:5,3:6", "unreadable friends not kept: " .. h.ids(p:GetCollection()))
+    end)
+
+    -- Offline row: removes offline Battle.net friends when unchecked, keeps them when checked,
+    -- and never touches a WoW character friend.
+    withHook({}, function(h)
+        h.friends[1] = { games = { { isOnline = false } } }
+        h.friends[2] = { games = d3Online() }
+        local list = {
+            { buttonType = T_BNET, id = 1 }, { buttonType = T_BNET, id = 2 }, { buttonType = T_WOW, id = 7 },
+        }
+        local p = h.newProvider(list)
+        h.setChecked(h.UI.OFFLINE_KEY, false)
+        h.drive(p)
+        assert(h.ids(p:GetCollection()) == "3:2,2:7", "offline friend not removed: " .. h.ids(p:GetCollection()))
+        h.setChecked(h.UI.OFFLINE_KEY, true)
+        h.Filter.Reapply()
+        assert(h.ids(p:GetCollection()) == "3:1,3:2,2:7", "offline friend not restored: " .. h.ids(p:GetCollection()))
+        local p2 = h.newProvider(list)
+        h.drive(p2)
+        assert(p2.flushes == 0 and p2.inserts == 0, "offline checked caused an edit")
+    end)
+
+    -- A throw inside shouldHide latches the guard and prints once.
+    withHook({}, function(h)
+        local list, d3 = setupList(h)
+        h.setChecked(d3, false)
+        h.throwOnInfo = true
+        local p = h.newProvider(list)
+        local ok = pcall(h.drive, p)
+        assert(ok, "hook raised the error to the caller")
+        assert(h.Filter.IsDisabled(), "guard not latched after an error")
+        assert(#h.printed == 1, "expected one message, got " .. #h.printed)
+        h.throwOnInfo = false
+        local calls = h.counts.friendInfo
+        h.drive(h.newProvider(list))
+        h.Filter.Reapply()
+        assert(h.counts.friendInfo == calls, "filter ran after the guard latched")
+        assert(#h.printed == 1, "message printed more than once")
+    end)
+
+    -- ADDON_ACTION_BLOCKED naming ForeverFilter latches the guard; other addons do not.
+    withHook({}, function(h)
+        local list, d3 = setupList(h)
+        h.setChecked(d3, false)
+        h.fire("ADDON_ACTION_BLOCKED", "SomeOtherAddon", "Func")
+        assert(not h.Filter.IsDisabled(), "another addon's block latched the guard")
+        h.fire("ADDON_ACTION_BLOCKED", "ForeverFilter", "Func")
+        assert(h.Filter.IsDisabled(), "guard not latched by ADDON_ACTION_BLOCKED")
+        assert(#h.printed == 1, "expected one message, got " .. #h.printed)
+        local p = h.newProvider(list)
+        local original = h.ids(list)
+        h.drive(p)
+        assert(p.flushes == 0 and p.inserts == 0 and h.ids(p:GetCollection()) == original, "filter ran after block")
+    end)
+
+    -- Install with FriendsListFrame = nil raises no error and hooks on a later ADDON_LOADED.
+    withHook({ noFrame = true }, function(h)
+        assert(#h.hooks == 0, "hooked with no frame")
+        assert(pcall(h.Filter.Install), "Install raised with no frame")
+        FriendsListFrame = { ScrollBox = h.scrollBox, IsShown = function() return true end }
+        h.fire("ADDON_LOADED", "Blizzard_FriendsFrame")
+        assert(#h.hooks == 1, "not hooked after ADDON_LOADED")
+        h.fire("ADDON_LOADED", "Other")
+        assert(#h.hooks == 1, "hooked twice")
+    end)
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Example tests: the SocialUI hook and the source scan
+--
+-- Validates: Requirements 1.1, 5.1, 6.1, 6.2, 7.4
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Example tests: the SocialUI hook and the source scan", function()
+    local globalNames = { "print", "C_BattleNet", "issecretvalue" }
+    local savedGlobals = {}
+    for _, n in ipairs(globalNames) do savedGlobals[n] = _G[n] end
+
+    local function newNode(data)
+        local node = { data = data, children = {} }
+        function node:GetData() return self.data end
+        function node:GetNodes() return self.children end
+        function node:Remove(child)
+            for i, c in ipairs(self.children) do
+                if c == child then table.remove(self.children, i); return end
+            end
+        end
+        function node:InsertNode(child, index) table.insert(self.children, index, child) end
+        return node
+    end
+
+    local function nodeIds(header)
+        local out = {}
+        for i, c in ipairs(header:GetNodes()) do out[i] = tostring(c:GetData().friendIndex) end
+        return table.concat(out, ",")
+    end
+
+    local hooks, shown = {}, true
+    local scrollBox = {}
+    function scrollBox:SetDataProvider(p)
+        self.provider = p
+        for _, fn in ipairs(hooks) do fn(self, p) end
+    end
+    function scrollBox:GetDataProvider() return self.provider end
+
+    local friends = {
+        [1] = { { isOnline = true, clientProgram = "D3" } },
+        [2] = { { isOnline = true, clientProgram = "WoW", wowProjectID = 1 } },
+        [3] = { { isOnline = true, clientProgram = "D3" } },
+        [4] = { { isOnline = true, clientProgram = "D3" } },
+    }
+    issecretvalue = function() return false end
+    print = function() end
+    C_BattleNet = {
+        GetFriendAccountInfo = function(i) return { gameAccountInfo = friends[i][1] } end,
+        GetFriendNumGameAccounts = function(i) return #friends[i] end,
+        GetFriendGameAccountInfo = function(i, j) return friends[i][j] end,
+    }
+
+    local env = {
+        hooksecurefunc = function(target, method, fn)
+            assert(target == scrollBox and method == "SetDataProvider", "unexpected hook target")
+            hooks[#hooks + 1] = fn
+        end,
+        SocialUIFrame = { FriendsList = { ScrollBox = scrollBox, IsShown = function() return shown end } },
+    }
+    local Filter, ns, restore = loadFilter(env)
+    local ok, err = pcall(function()
+        ns.db = { checkedGames = {} }
+        Filter.Install()
+        assert(#hooks == 1, "SocialUI ScrollBox not hooked")
+
+        local headerA = newNode({ headerText = "A" })
+        local headerB = newNode({ headerText = "B" })
+        local spacer = newNode({ spacer = true })
+        local dataA, dataB = headerA:GetData(), headerB:GetData()
+        local function friendNode(i) return newNode({ friendIndex = i }) end
+        local n1, n2, n3, n4 = friendNode(1), friendNode(2), friendNode(3), friendNode(4)
+        headerA.children = { n1, n2, n3 }
+        headerB.children = { n4 }
+        local root = newNode(nil)
+        root.children = { headerA, spacer, headerB }
+        local invalidates = 0
+        local provider = {
+            GetRootNode = function() return root end,
+            Invalidate = function() invalidates = invalidates + 1 end,
+        }
+
+        local d3 = ns.UI.GameKey("D3")
+        ns.db.checkedGames[d3] = false
+        scrollBox:SetDataProvider(provider)
+
+        assert(nodeIds(headerA) == "2", "header A wrong: " .. nodeIds(headerA))
+        assert(nodeIds(headerB) == "", "header B wrong: " .. nodeIds(headerB))
+        assert(#root.children == 3 and root.children[1] == headerA and root.children[2] == spacer
+            and root.children[3] == headerB, "header or spacer nodes changed")
+        assert(headerA:GetData() == dataA and headerB:GetData() == dataB
+            and dataA.headerText == "A" and dataB.headerText == "B", "header data changed")
+        assert(invalidates == 1, "Invalidate called " .. invalidates .. " times")
+
+        ns.db.checkedGames[d3] = true
+        Filter.Reapply()
+        assert(nodeIds(headerA) == "1,2,3", "header A not restored: " .. nodeIds(headerA))
+        assert(nodeIds(headerB) == "4", "header B not restored: " .. nodeIds(headerB))
+        assert(headerA:GetNodes()[1] == n1 and headerA:GetNodes()[3] == n3 and headerB:GetNodes()[1] == n4,
+            "restored nodes are not the original nodes")
+        assert(not Filter.IsDisabled(), "guard latched")
+    end)
+    restore()
+    for _, n in ipairs(globalNames) do _G[n] = savedGlobals[n] end
+    if not ok then error(err, 0) end
+
+    -- Source scan of Filter.lua.
+    local fh = assert(io.open("ForeverFilter/Filter.lua", "rb"))
+    local source = fh:read("*a")
+    fh:close()
+    for _, banned in ipairs({ "BNRemoveFriend", "RemoveFriend", "BNSetFriendNote", "BNSetFriendFavorite",
+                              "FriendsList_Update(", "FriendsFrame_", ":Refresh(" }) do
+        assert(not source:find(banned, 1, true), "Filter.lua contains " .. banned)
+    end
+    -- No assignment to a Blizzard global: every assigned root name must be a local or ns/Filter field.
+    local locals = {}
+    for line in source:gmatch("[^\n]+") do
+        local decl = line:match("^%s*local%s+function%s+([%w_]+)")
+        if decl then locals[decl] = true end
+        local names = line:match("^%s*local%s+([%w_,%s]-)%s*=") or line:match("^%s*local%s+([%w_,%s]+)$")
+        if names then for n in names:gmatch("[%w_]+") do locals[n] = true end end
+        local params = line:match("function%s*[%w_.:]*%((.-)%)")
+        if params then for n in params:gmatch("[%w_]+") do locals[n] = true end end
+        local forVars = line:match("^%s*for%s+(.-)%s+in%s")
+        if forVars then for n in forVars:gmatch("[%w_]+") do locals[n] = true end end
+    end
+    for line in source:gmatch("[^\n]+") do
+        local code = line:gsub("%-%-.*$", "")
+        if not code:match("^%s*local%s") then
+            local root = code:match("^%s*([%a_][%w_]*)[%w_%.]*%s*=[^=]")
+            if root then
+                assert(locals[root] or root == "ns", "assignment to global " .. root .. ": " .. line)
+            end
+            local gfn = code:match("^%s*function%s+([%a_][%w_]*)%s*%(")
+            assert(not gfn, "global function definition " .. tostring(gfn))
+            assert(not code:find("_G%s*[%.%[]"), "_G access: " .. line)
+        end
+    end
+
+    -- The TOC loads Filter.lua after UI.lua.
+    local th = assert(io.open("ForeverFilter/ForeverFilter.toc", "rb"))
+    local toc = th:read("*a")
+    th:close()
+    local uiPos = toc:find("\nUI.lua", 1, true)
+    local filterPos = toc:find("\nFilter.lua", 1, true)
+    assert(uiPos and filterPos and filterPos > uiPos, "Filter.lua is not listed after UI.lua in the TOC")
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Example tests for the window wiring
+-- Validates: Requirements 2.4, 10.1, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7, 10.10, 10.16
+----------------------------------------------------------------------
+local function flWindow(env, ctx, gameRows, offlineCount)
+    env.ns.Friends = {
+        GetAll = function() return {} end,
+        GroupByGame = function() return gameRows end,
+        CountOffline = function() return offlineCount end,
+    }
+    env.reapplies = {}
+    env.ns.Filter = { Reapply = function() env.reapplies[#env.reapplies + 1] = true end }
+    env.UI.Show()
+    local checks = {}
+    for _, f in ipairs(ctx.created) do
+        if f.kind == "CheckButton" and f.template == "UICheckButtonTemplate" and f.shown then
+            checks[#checks + 1] = f
+        end
+    end
+    -- Header text of a row: the font string anchored to the row's checkbox.
+    local function textOf(check)
+        for _, fs in ipairs(env.fontStrings) do
+            for _, c in ipairs(fs.calls) do
+                if c[1] == "SetPoint" and c[3] == check then return rawget(fs, "text") end
+            end
+        end
+    end
+    return checks, textOf
+end
+
+local function flDivider(env)
+    -- UI.lua stores the divider texture on the window frame.
+    return rawget(env.win, "offlineDivider")
+end
+
+local function flLastHeight(win)
+    local h
+    for _, c in ipairs(win.calls) do
+        if c[1] == "SetHeight" then h = c[2] end
+    end
+    return h
+end
+
+property("Feature: friends-list-filter, Example tests: Offline row, divider and empty state", function()
+    local ROW_GAP, DIVIDER_H = 6, 7
+    -- Only the Offline row: present with count 0, no divider, height counts the row.
+    withOptions(function(env, ctx)
+        env.ns.db.showPlayerCounts = false
+        local checks, textOf = flWindow(env, ctx, {}, 0)
+        assert(#checks == 1, "expected only the Offline row, got " .. #checks)
+        assert(textOf(checks[1]) == "Offline", "label: " .. tostring(textOf(checks[1])))
+        assert(checks[1].shown and checks[1].checked == true, "Offline row not shown/checked by default")
+        assert(env.UI.OfflineDividerVisible(0) == false)
+        for _, f in ipairs(env.fontStrings) do
+            local t = rawget(f, "text")
+            assert(not (type(t) == "string" and t:lower():find("no friends")), "empty-state message shown")
+        end
+        local want = env.UI.ComputeWindowHeight(env.UI.RowHeight(nil), 1080, false)
+        assert(flLastHeight(env.win) == want, "height " .. tostring(flLastHeight(env.win)) .. " vs " .. want)
+        assert(want > 120 or want == 120)
+    end)
+
+    -- Counts on: the Offline label carries its count, even 0.
+    withOptions(function(env, ctx)
+        env.ns.db.showPlayerCounts = true
+        local checks, textOf = flWindow(env, ctx, {}, 0)
+        assert(textOf(checks[1]) == "Offline (0)", "label: " .. tostring(textOf(checks[1])))
+    end)
+
+    -- Game rows: Offline is last, divider sits directly above it and adds its height.
+    withOptions(function(env, ctx)
+        env.ns.db.showPlayerCounts = true
+        local rows = { { game = "WoW", wowProjectID = 1, count = 2 }, { game = "D4", count = 1 } }
+        local checks, textOf = flWindow(env, ctx, rows, 3)
+        assert(#checks == 3, "expected 3 rows, got " .. #checks)
+        assert(textOf(checks[3]) == "Offline (3)", "label: " .. tostring(textOf(checks[3])))
+        assert(textOf(checks[1]) == "WoW (2)" and textOf(checks[2]) == "D4 (1)", "game labels")
+        local rh = env.UI.RowHeight(nil)
+        local div = flDivider(env)
+        assert(div and div.shown, "divider not shown")
+        local divY, offY
+        for _, c in ipairs(div.calls) do
+            if c[1] == "SetPoint" and c[2] == "TOPLEFT" then divY = c[6] end
+        end
+        for _, c in ipairs(checks[3].calls) do
+            if c[1] == "SetPoint" and c[2] == "TOPLEFT" then offY = c[6] end
+        end
+        assert(divY == -(2 * (rh + ROW_GAP)), "divider y " .. tostring(divY))
+        assert(offY == divY - DIVIDER_H, "offline y " .. tostring(offY) .. " divider y " .. tostring(divY))
+        local area = 3 * rh + 2 * ROW_GAP + DIVIDER_H
+        assert(flLastHeight(env.win) == env.UI.ComputeWindowHeight(area, 1080, false), "height with divider")
+
+        -- Counts off: no count on the Offline label.
+        env.ns.db.showPlayerCounts = false
+        env.win.shown = true
+        env.UI.Show()
+        assert(textOf(checks[3]) == "Offline", "label without counts: " .. tostring(textOf(checks[3])))
+    end)
+
+    -- No game rows afterwards: the divider is hidden.
+    withOptions(function(env, ctx)
+        local checks = flWindow(env, ctx, { { game = "WoW", wowProjectID = 1, count = 1 } }, 0)
+        local div = flDivider(env)
+        assert(div and div.shown, "divider not shown with a game row")
+        env.ns.Friends.GroupByGame = function() return {} end
+        env.UI.Show()
+        assert(not div.shown, "divider still shown without game rows")
+    end)
+end)
+
+property("Feature: friends-list-filter, Example tests: checkbox clicks call Reapply", function()
+    withOptions(function(env, ctx)
+        local db = env.ns.db
+        local checks = flWindow(env, ctx, { { game = "WoW", wowProjectID = 1, count = 1 } }, 0)
+        local gameCheck, offCheck = checks[1], checks[2]
+        local order = {}
+        local seenAtReapply
+        env.ns.Filter.Reapply = function()
+            order[#order + 1] = "Reapply"
+            seenAtReapply = { game = env.UI.IsChecked("WoW", 1), offline = env.UI.IsOfflineChecked() }
+        end
+
+        gameCheck.checked = false
+        gameCheck.scripts.OnClick(gameCheck)
+        assert(#order == 1 and seenAtReapply.game == false, "game click: Reapply must follow SetChecked")
+        assert(db.checkedGames[env.UI.OFFLINE_KEY] == nil, "game click wrote the Offline key")
+
+        order = {}
+        offCheck.checked = false
+        offCheck.scripts.OnClick(offCheck)
+        assert(#order == 1 and seenAtReapply.offline == false, "offline click: Reapply must follow the write")
+        assert(db.checkedGames["@offline"] == false, "checkedGames[@offline] not written")
+
+        -- ns.Filter nil: clicks still write and raise no error.
+        env.ns.Filter = nil
+        offCheck.checked = true
+        local ok, err = pcall(offCheck.scripts.OnClick, offCheck)
+        assert(ok, "offline click raised: " .. tostring(err))
+        assert(db.checkedGames["@offline"] == true)
+        gameCheck.checked = true
+        ok, err = pcall(gameCheck.scripts.OnClick, gameCheck)
+        assert(ok, "game click raised: " .. tostring(err))
+        assert(env.UI.IsChecked("WoW", 1) == true)
+    end)
+end)
+
+property("Feature: friends-list-filter, Example tests: Reset to defaults leaves the Offline state and skips Reapply", function()
+    withOptions(function(env, ctx)
+        local db = env.ns.db
+        local checks = flWindow(env, ctx, { { game = "WoW", wowProjectID = 1, count = 1 } }, 0)
+        env.UI.SetOfflineChecked(false)
+        env.UI.Refresh()
+        local gear = ctx.find("Button", env.win)
+        gear.scripts.OnClick(gear)
+        local p = ctx.parts()
+        local before = optDeepCopy(db.checkedGames)
+        env.reapplies = {}
+        p.reset.scripts.OnClick(p.reset)
+        assert(#env.reapplies == 0, "reset called Reapply")
+        assert(optDeepEqual(db.checkedGames, before), "reset changed checkedGames")
+        assert(db.checkedGames["@offline"] == false and checks[2].checked == false, "Offline state changed")
+    end)
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 15: Presence games ignore apps when a real game is online
+--
+-- Validates: Requirements 11.1, 11.2, 11.3, 11.4
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 15: Presence games ignore apps when a real game is online", function()
+    local Friends = loadFriends()
+    local codes = { "WoW", "Pro", "D3", "Hero", "App", "BSAp", "CLNT", "", "nil" }
+    local appCodes = { App = true, BSAp = true, CLNT = true }
+
+    local function genInfo(tag)
+        local code = pick(codes)
+        if code == "nil" then code = nil end
+        return { isOnline = random() < 0.6, clientProgram = code, tag = tag }
+    end
+
+    -- Expected result by the property text, for one account list.
+    local function expectedFor(list)
+        local real, firstApp = {}, nil
+        for _, info in ipairs(list) do
+            if info.isOnline then
+                if appCodes[info.clientProgram] then
+                    firstApp = firstApp or info
+                else
+                    real[#real + 1] = info
+                end
+            end
+        end
+        if #real > 0 then return real end
+        if firstApp then return { firstApp } end
+        return {}
+    end
+
+    for i = 1, ITERATIONS do
+        local infos = {}
+        local anyOnline = false
+        for k = 1, random(0, 6) do
+            infos[k] = genInfo("a" .. k)
+            if infos[k].isOnline then anyOnline = true end
+        end
+        local primary = random() < 0.2 and nil or genInfo("primary")
+
+        local expected
+        if anyOnline then
+            expected = expectedFor(infos)
+        elseif primary and primary.isOnline then
+            expected = expectedFor({ primary })
+        else
+            expected = {}
+        end
+
+        local got = Friends.PresenceGames(infos, primary)
+        assert(type(got) == "table", "iteration " .. i .. ": result is not a table")
+        assert(#got == #expected,
+            "iteration " .. i .. ": got " .. #got .. " accounts, expected " .. #expected)
+        for k = 1, #expected do
+            assert(got[k] == expected[k],
+                "iteration " .. i .. ": account " .. k .. " is " .. show(got[k] and got[k].tag)
+                .. ", expected " .. show(expected[k].tag))
+        end
+
+        -- Outcome checks stated directly
+        local hasReal = false
+        for _, info in ipairs(got) do
+            if not appCodes[info.clientProgram] then hasReal = true end
+        end
+        if hasReal then
+            for _, info in ipairs(got) do
+                assert(not appCodes[info.clientProgram] and info.isOnline,
+                    "iteration " .. i .. ": app or offline account returned with a real game")
+            end
+        elseif #got > 0 then
+            assert(#got == 1 and appCodes[got[1].clientProgram] and got[1].isOnline,
+                "iteration " .. i .. ": app-only result is not one online app account")
+        end
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 16: Window and filter keys agree for every friend
+--
+-- Validates: Requirements 11.7, 11.8, 11.9
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 16: Window and filter keys agree for every friend", function()
+    -- Friends.lua and UI.lua share one ns so UI.FriendGameKeys finds ns.Friends.
+    local Friends, ns = loadFriends()
+    ns.db = {}
+    local chunk, err = loadfile("ForeverFilter/UI.lua")
+    if not chunk then error("cannot load ForeverFilter/UI.lua: " .. tostring(err)) end
+    chunk("ForeverFilter", ns)
+    local UI = ns.UI
+
+    local savedNum, savedBN = BNGetNumFriends, C_BattleNet
+    local codes = { "WoW", "Pro", "D3", "Hero", "App", "BSAp", "CLNT", "", "nil" }
+    local pids = { 1, 2, 5, 11, 14, 0, "nil" }
+
+    local function genInfo()
+        local code = pick(codes)
+        if code == "nil" then code = nil end
+        local pid = pick(pids)
+        if pid == "nil" then pid = nil end
+        return { isOnline = random() < 0.6, clientProgram = code, wowProjectID = pid }
+    end
+
+    local ok, perr = pcall(function()
+        for i = 1, ITERATIONS do
+            local friends = {}
+            for f = 1, random(0, 8) do
+                local accounts = {}
+                for k = 1, random(0, 5) do accounts[k] = genInfo() end
+                friends[f] = {
+                    name = "friend" .. f,
+                    accounts = accounts,
+                    primary = random() < 0.2 and nil or genInfo(),
+                }
+            end
+
+            BNGetNumFriends = function() return #friends end
+            C_BattleNet = {
+                GetFriendAccountInfo = function(idx)
+                    local fr = friends[idx]
+                    return { accountName = fr.name, gameAccountInfo = fr.primary }
+                end,
+                GetFriendNumGameAccounts = function(idx) return #friends[idx].accounts end,
+                GetFriendGameAccountInfo = function(idx, g) return friends[idx].accounts[g] end,
+            }
+
+            local rows = Friends.GroupByGame(Friends.GetAll())
+            local rowKeysByFriend = {}
+            local appsFriends, otherFriends = {}, {}
+            for _, row in ipairs(rows) do
+                local key = UI.GameKey(row.game, row.wowProjectID)
+                for _, name in ipairs(row.friends) do
+                    rowKeysByFriend[name] = rowKeysByFriend[name] or {}
+                    rowKeysByFriend[name][key] = true
+                    if key == UI.APPS_KEY then
+                        appsFriends[name] = true
+                    else
+                        otherFriends[name] = true
+                    end
+                end
+            end
+
+            for _, fr in ipairs(friends) do
+                local keys = UI.FriendGameKeys(fr.accounts, fr.primary)
+                local keySet, keyCount = {}, 0
+                local hasReal = false
+                for _, key in ipairs(keys) do
+                    assert(not keySet[key], "iteration " .. i .. ": duplicate key " .. show(key))
+                    keySet[key] = true
+                    keyCount = keyCount + 1
+                    if key ~= UI.APPS_KEY then hasReal = true end
+                end
+
+                local rowSet, rowCount = rowKeysByFriend[fr.name] or {}, 0
+                for key in pairs(rowSet) do
+                    rowCount = rowCount + 1
+                    assert(keySet[key], "iteration " .. i .. ": " .. fr.name
+                        .. " is in row " .. show(key) .. " but FriendGameKeys lacks it")
+                end
+                assert(rowCount == keyCount, "iteration " .. i .. ": " .. fr.name .. " has "
+                    .. keyCount .. " filter keys but is in " .. rowCount .. " rows")
+
+                if hasReal then
+                    assert(not appsFriends[fr.name],
+                        "iteration " .. i .. ": " .. fr.name .. " has a real game but is in the @apps row")
+                end
+                if appsFriends[fr.name] then
+                    assert(not otherFriends[fr.name],
+                        "iteration " .. i .. ": " .. fr.name .. " is in @apps and another row")
+                end
+            end
+        end
+    end)
+
+    BNGetNumFriends, C_BattleNet = savedNum, savedBN
+    if not ok then error(perr, 0) end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 17: Row counts follow the presence rule
+--
+-- Validates: Requirements 11.6, 11.7, 11.8
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 17: Row counts follow the presence rule", function()
+    local Friends, ns = loadFriends()
+    ns.db = {}
+    local chunk, err = loadfile("ForeverFilter/UI.lua")
+    if not chunk then error("cannot load ForeverFilter/UI.lua: " .. tostring(err)) end
+    chunk("ForeverFilter", ns)
+    local UI = ns.UI
+
+    local savedNum, savedBN = BNGetNumFriends, C_BattleNet
+    local codes = { "WoW", "Pro", "D3", "Hero", "App", "BSAp", "CLNT", "", "nil" }
+    local pids = { 1, 2, 5, 11, 14, 0, "nil" }
+
+    local function genInfo()
+        local code = pick(codes)
+        if code == "nil" then code = nil end
+        local pid = pick(pids)
+        if pid == "nil" then pid = nil end
+        return { isOnline = random() < 0.6, clientProgram = code, wowProjectID = pid }
+    end
+
+    local ok, perr = pcall(function()
+        for i = 1, ITERATIONS do
+            local friends = {}
+            for f = 1, random(0, 8) do
+                local accounts = {}
+                for k = 1, random(0, 5) do accounts[k] = genInfo() end
+                friends[f] = {
+                    name = "friend" .. f,
+                    accounts = accounts,
+                    primary = random() < 0.2 and nil or genInfo(),
+                }
+            end
+
+            BNGetNumFriends = function() return #friends end
+            C_BattleNet = {
+                GetFriendAccountInfo = function(idx)
+                    local fr = friends[idx]
+                    return { accountName = fr.name, gameAccountInfo = fr.primary }
+                end,
+                GetFriendNumGameAccounts = function(idx) return #friends[idx].accounts end,
+                GetFriendGameAccountInfo = function(idx, g) return friends[idx].accounts[g] end,
+            }
+
+            -- Expected counts per key from each friend's FriendGameKeys.
+            local expected, appsOnly = {}, 0
+            for _, fr in ipairs(friends) do
+                local keys = UI.FriendGameKeys(fr.accounts, fr.primary)
+                local onlyApps = #keys > 0
+                for _, key in ipairs(keys) do
+                    expected[key] = (expected[key] or 0) + 1
+                    if key ~= UI.APPS_KEY then onlyApps = false end
+                end
+                if onlyApps then appsOnly = appsOnly + 1 end
+            end
+
+            local rows = Friends.GroupByGame(Friends.GetAll())
+            local seen, rowKeys = {}, 0
+            for _, row in ipairs(rows) do
+                local key = UI.GameKey(row.game, row.wowProjectID)
+                assert(not seen[key], "iteration " .. i .. ": duplicate row " .. show(key))
+                seen[key] = true
+                rowKeys = rowKeys + 1
+                assert(row.count == (expected[key] or 0), "iteration " .. i .. ": row " .. show(key)
+                    .. " count " .. show(row.count) .. ", expected " .. show(expected[key] or 0))
+                if key == UI.APPS_KEY then
+                    assert(row.count == appsOnly, "iteration " .. i .. ": @apps count "
+                        .. show(row.count) .. ", expected " .. appsOnly .. " apps-only friends")
+                end
+            end
+            for key, n in pairs(expected) do
+                assert(seen[key], "iteration " .. i .. ": no row for key " .. show(key)
+                    .. " (" .. n .. " friends)")
+            end
+            if not seen[UI.APPS_KEY] then
+                assert(appsOnly == 0, "iteration " .. i .. ": no @apps row but " .. appsOnly .. " apps-only friends")
+            end
+        end
+    end)
+
+    BNGetNumFriends, C_BattleNet = savedNum, savedBN
+    if not ok then error(perr, 0) end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 18: Hide decision with apps
+--
+-- Validates: Requirements 11.10, 11.11, 11.12, 11.19
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 18: Hide decision with apps", function()
+    local _, ns = loadFriends()
+    ns.db = {}
+    local chunk, err = loadfile("ForeverFilter/UI.lua")
+    if not chunk then error("cannot load ForeverFilter/UI.lua: " .. tostring(err)) end
+    chunk("ForeverFilter", ns)
+    local UI = ns.UI
+
+    local codes = { "WoW", "Pro", "D3", "Hero", "App", "BSAp", "CLNT", "", "nil" }
+    local pids = { 1, 2, 5, 11, 14, 0, "nil" }
+
+    local function genInfo()
+        local code = pick(codes)
+        if code == "nil" then code = nil end
+        local pid = pick(pids)
+        if pid == "nil" then pid = nil end
+        return { isOnline = random() < 0.6, clientProgram = code, wowProjectID = pid }
+    end
+
+    -- Every key a friend can produce, plus the apps key.
+    local keyPool = { UI.APPS_KEY }
+    for _, c in ipairs(codes) do
+        for _, p in ipairs(pids) do
+            keyPool[#keyPool + 1] = UI.GameKey(c ~= "nil" and c or nil, p ~= "nil" and p or nil)
+        end
+    end
+
+    local junk = { "yes", 0, 1, {}, "false" }
+    local function genValue()
+        local r = random()
+        if r < 0.35 then return true end
+        if r < 0.7 then return false end
+        if r < 0.85 then return nil end
+        return pick(junk)
+    end
+
+    for i = 1, ITERATIONS do
+        local checks = {}
+        for _, key in ipairs(keyPool) do checks[key] = genValue() end
+        -- Bias toward the cases that decide the outcome.
+        if random() < 0.3 then checks[UI.APPS_KEY] = false end
+        if random() < 0.3 then checks[UI.APPS_KEY] = true end
+
+        local function isChecked(key)
+            local v = checks[key]
+            if type(v) == "boolean" then return v end
+            return true
+        end
+        local offlineChecked = pick({ true, false })
+
+        local accounts = {}
+        for k = 1, random(0, 5) do accounts[k] = genInfo() end
+        local accountInfo
+        local shape = random(1, 10)
+        if shape == 1 then
+            accountInfo = nil
+        elseif shape == 2 then
+            accountInfo = { gameAccountInfo = nil }
+        elseif shape == 3 then
+            accountInfo = { gameAccountInfo = { isOnline = "yes" } }
+        else
+            accountInfo = { gameAccountInfo = genInfo() }
+        end
+
+        local isOnline, keys = UI.FriendState(accountInfo, accounts)
+        local hide = UI.ShouldHideBnetElement(true, isOnline, keys, isChecked, offlineChecked)
+
+        local expected
+        if isOnline == nil then
+            expected = false
+        elseif isOnline == false then
+            expected = (offlineChecked == false)
+        else
+            local hasReal, allRealUnchecked = false, true
+            for _, key in ipairs(keys) do
+                if key ~= UI.APPS_KEY then
+                    hasReal = true
+                    if isChecked(key) ~= false then allRealUnchecked = false end
+                end
+            end
+            if hasReal then
+                expected = allRealUnchecked
+            elseif #keys > 0 then
+                expected = (isChecked(UI.APPS_KEY) == false)
+            else
+                expected = false
+            end
+        end
+
+        assert(hide == expected, "iteration " .. i .. ": keys " .. show(keys) .. ", online "
+            .. show(isOnline) .. ", apps " .. show(checks[UI.APPS_KEY]) .. ": hide "
+            .. show(hide) .. ", expected " .. show(expected))
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 19: Apps checked state, legacy default, and isolation
+--
+-- Validates: Requirements 11.13, 11.14, 11.15, 11.16
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 19: Apps checked state, legacy default, and isolation", function()
+    local function deepEqual(a, b)
+        if type(a) ~= "table" or type(b) ~= "table" then return rawequal(a, b) end
+        for k, v in pairs(a) do if not deepEqual(v, b[k]) then return false end end
+        for k in pairs(b) do if a[k] == nil then return false end end
+        return true
+    end
+    local function deepCopy(v)
+        if type(v) ~= "table" then return v end
+        local c = {}
+        for k, x in pairs(v) do c[k] = deepCopy(x) end
+        return c
+    end
+    local junk = { "yes", "false", 0, 1, {}, function() end }
+    -- Booleans, missing entries, and junk.
+    local function genEntry()
+        local r = random()
+        if r < 0.35 then return true end
+        if r < 0.7 then return false end
+        if r < 0.85 then return nil end
+        return pick(junk)
+    end
+
+    for i = 1, ITERATIONS do
+        local store = {}
+        for _ = 1, random(0, 4) do store[genString() .. ":" .. random(0, 20)] = random() < 0.5 end
+        for _, key in ipairs({ "@apps", "App:nil", "BSAp:nil", "CLNT:nil" }) do store[key] = genEntry() end
+        -- Bias toward the legacy-false case.
+        if random() < 0.25 then store["App:nil"] = false; store["BSAp:nil"] = false end
+        local db = { checkedGames = store }
+        for _ = 1, random(0, 3) do db["extra" .. random(1, 9)] = genEntry() end
+
+        local UI = loadUI(db)
+        local before = deepCopy(store)
+        local dbBefore = deepCopy(db)
+        local ctx = "iteration " .. i
+
+        local expected
+        if type(before["@apps"]) == "boolean" then
+            expected = before["@apps"]
+        else
+            expected = not (before["App:nil"] == false and before["BSAp:nil"] == false)
+        end
+        local got = UI.IsAppsChecked()
+        assert(got == expected, string.format("%s: IsAppsChecked got %s, expected %s", ctx, tostring(got), tostring(expected)))
+        assert(deepEqual(store, before), ctx .. ": IsAppsChecked changed checkedGames")
+        assert(deepEqual(db, dbBefore), ctx .. ": IsAppsChecked changed the db")
+
+        local b = random() < 0.5
+        UI.SetAppsChecked(b)
+        assert(UI.IsAppsChecked() == b, ctx .. ": round trip returned the wrong value")
+        assert(store["@apps"] == b, ctx .. ": stored value is not the boolean written")
+        for k, v in pairs(before) do
+            if k ~= "@apps" then
+                assert(deepEqual(store[k], v), ctx .. ": other entry changed: " .. show(k))
+            end
+        end
+        for k in pairs(store) do
+            assert(k == "@apps" or before[k] ~= nil, ctx .. ": unexpected new entry " .. show(k))
+        end
+        for k, v in pairs(dbBefore) do
+            if k ~= "checkedGames" then
+                assert(deepEqual(db[k], v), ctx .. ": db field changed: " .. show(k))
+            end
+        end
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Property 20: The Apps key never equals another key
+--
+-- Validates: Requirements 11.18
+----------------------------------------------------------------------
+property("Feature: friends-list-filter, Property 20: The Apps key never equals another key", function()
+    local UI = loadUI({})
+    assert(UI.APPS_KEY ~= UI.OFFLINE_KEY, "APPS_KEY equals OFFLINE_KEY")
+
+    local extra = { "", "é", "日本語", "ü:1", "@apps ", "@APPS", "@offline", "apps", "@", "App", "BSAp", "WoW" }
+    local function genGame()
+        local r = random()
+        if r < 0.4 then return genString() end
+        if r < 0.6 then return pick(extra) end
+        if r < 0.8 then return random(-5, 100) end
+        return nil
+    end
+    local function genPid()
+        local r = random()
+        if r < 0.5 then return random(0, 20) end
+        if r < 0.75 then return genString() end
+        return nil
+    end
+
+    for i = 1, ITERATIONS do
+        local game, pid = genGame(), genPid()
+        local key = UI.GameKey(game, pid)
+        assert(key ~= UI.APPS_KEY, "iteration " .. i .. ": GameKey(" .. show(game) .. ", " .. show(pid) .. ") equals APPS_KEY")
+        assert(key ~= UI.OFFLINE_KEY, "iteration " .. i .. ": GameKey(" .. show(game) .. ", " .. show(pid) .. ") equals OFFLINE_KEY")
+        local appsKey = UI.GameKey("@apps", pid)
+        assert(appsKey == UI.APPS_KEY, "iteration " .. i .. ": GameKey(\"@apps\", " .. show(pid) .. ") returned " .. show(appsKey))
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-filter, Example tests: app presence rules
+--
+-- Validates: Requirements 11.2, 11.3, 11.5, 11.6, 11.7, 11.8, 11.10, 11.11, 11.12, 11.14,
+-- 11.15, 11.16, 11.17
+----------------------------------------------------------------------
+-- Stubs BNGetNumFriends and C_BattleNet from friends = { { name, accounts, primary }, ... },
+-- runs fn, and restores both globals. A friend's primary defaults to its first account.
+local function withBattleNetFriends(friends, fn)
+    local savedNum, savedBN = BNGetNumFriends, C_BattleNet
+    BNGetNumFriends = function() return #friends end
+    C_BattleNet = {
+        GetFriendAccountInfo = function(i)
+            local f = friends[i]
+            if not f then return nil end
+            return { accountName = f.name, gameAccountInfo = f.primary or f.accounts[1] }
+        end,
+        GetFriendNumGameAccounts = function(i) return #friends[i].accounts end,
+        GetFriendGameAccountInfo = function(i, j) return friends[i].accounts[j] end,
+    }
+    local ok, err = pcall(fn)
+    BNGetNumFriends, C_BattleNet = savedNum, savedBN
+    if not ok then error(err, 0) end
+end
+
+local function appAcct(code) return { isOnline = true, clientProgram = code } end
+local function gameAcct(code, pid) return { isOnline = true, clientProgram = code, wowProjectID = pid } end
+
+-- The wowProjectID that Games.lua names "World of Warcraft: Forever".
+local WOW_FOREVER = 18
+
+property("Feature: friends-list-filter, Example tests: app presence rules, listing and hide decisions", function()
+    local db = { checkedGames = {} }
+    local UI, ns, Friends = loadUIWithFriends(db)
+    local Games = loadGames(ns)
+    assert(Games.GetGameName("WoW", WOW_FOREVER) == "World of Warcraft: Forever", "18 is not WoW Forever in Games.lua")
+    assert(Games.GetGameName("@apps") == "Battle.net", "GetGameName(@apps): " .. show(Games.GetGameName("@apps")))
+
+    local wowKey = UI.GameKey("WoW", WOW_FOREVER)
+    local hsKey, sc2Key = UI.GameKey("WTCG"), UI.GameKey("S2")
+    local friends = {
+        { name = "ForeverAndApp", accounts = { gameAcct("WoW", WOW_FOREVER), appAcct("App") } },
+        { name = "DesktopOnly", accounts = { appAcct("App") } },
+        { name = "MobileOnly", accounts = { appAcct("BSAp") } },
+        { name = "DesktopAndMobile", accounts = { appAcct("App"), appAcct("BSAp") } },
+        { name = "TwoGamesAndApp", accounts = { appAcct("App"), gameAcct("WTCG"), gameAcct("S2") } },
+    }
+    local function find(name)
+        for i, f in ipairs(friends) do if f.name == name then return f, i end end
+    end
+
+    local function hidden(name)
+        local f = find(name)
+        local isOnline, keys = UI.FriendState({ gameAccountInfo = f.primary or f.accounts[1] }, f.accounts)
+        local function isChecked(key)
+            if key == UI.APPS_KEY then return UI.IsAppsChecked() end
+            local v = db.checkedGames[key]
+            if type(v) == "boolean" then return v end
+            return true
+        end
+        return UI.ShouldHideBnetElement(true, isOnline, keys, isChecked, true)
+    end
+    local function setChecked(map) db.checkedGames = map end
+
+    withBattleNetFriends(friends, function()
+        -- Listing: every friend is online, rows are keyed like the filter keys.
+        local rows = Friends.GroupByGame(Friends.GetAll(), Games.GetGameName)
+        local listedUnder = {}
+        local appsRows = 0
+        for _, row in ipairs(rows) do
+            local key = UI.GameKey(row.game, row.wowProjectID)
+            if key == UI.APPS_KEY then appsRows = appsRows + 1 end
+            assert(row.game ~= "App" and row.game ~= "BSAp" and row.game ~= "CLNT", "a raw app row exists: " .. show(row.game))
+            for _, name in ipairs(row.friends) do
+                listedUnder[name] = listedUnder[name] or {}
+                listedUnder[name][key] = true
+            end
+        end
+        assert(appsRows == 1, "expected one Battle.net row, got " .. appsRows)
+        local function onlyUnder(name, ...)
+            local want, n = {}, 0
+            for _, k in ipairs({ ... }) do want[k] = true; n = n + 1 end
+            local got, m = listedUnder[name] or {}, 0
+            for k in pairs(got) do
+                m = m + 1
+                assert(want[k], name .. " is listed under unexpected row " .. show(k))
+            end
+            assert(m == n, name .. " is listed under " .. m .. " rows, expected " .. n)
+        end
+        onlyUnder("ForeverAndApp", wowKey)
+        onlyUnder("DesktopOnly", UI.APPS_KEY)
+        onlyUnder("MobileOnly", UI.APPS_KEY)
+        onlyUnder("DesktopAndMobile", UI.APPS_KEY)
+        onlyUnder("TwoGamesAndApp", hsKey, sc2Key)
+        for _, row in ipairs(rows) do
+            if UI.GameKey(row.game, row.wowProjectID) == UI.APPS_KEY then
+                assert(row.count == 3, "Battle.net row count " .. row.count .. ", expected 3 (desktop, mobile, both once)")
+            end
+        end
+
+        -- User scenario: WoW Forever unchecked, Battle.net row checked.
+        setChecked({ [wowKey] = false, [UI.APPS_KEY] = true })
+        assert(hidden("ForeverAndApp") == true, "WoW Forever + app friend not hidden when WoW Forever is unchecked")
+        assert(hidden("DesktopOnly") == false and hidden("MobileOnly") == false
+            and hidden("DesktopAndMobile") == false, "app-only friends hidden by the WoW Forever box")
+        assert(hidden("TwoGamesAndApp") == false, "two-game friend hidden by the WoW Forever box")
+
+        -- WoW Forever checked, Battle.net row unchecked: the game friend stays, app-only friends go.
+        setChecked({ [wowKey] = true, [UI.APPS_KEY] = false })
+        assert(hidden("ForeverAndApp") == false, "WoW Forever + app friend follows the app row")
+        assert(hidden("DesktopOnly") == true and hidden("MobileOnly") == true
+            and hidden("DesktopAndMobile") == true, "app-only friends kept with the Battle.net row unchecked")
+        assert(hidden("TwoGamesAndApp") == false, "two-game friend follows the app row")
+
+        -- Everything checked: nothing hidden.
+        setChecked({ [wowKey] = true, [UI.APPS_KEY] = true })
+        for _, f in ipairs(friends) do assert(hidden(f.name) == false, f.name .. " hidden with everything checked") end
+
+        -- Hearthstone, StarCraft 2 and an app: hidden only when both games are unchecked.
+        setChecked({ [hsKey] = false })
+        assert(hidden("TwoGamesAndApp") == false, "hidden with only Hearthstone unchecked")
+        setChecked({ [sc2Key] = false })
+        assert(hidden("TwoGamesAndApp") == false, "hidden with only StarCraft 2 unchecked")
+        setChecked({ [hsKey] = false, [sc2Key] = false })
+        assert(hidden("TwoGamesAndApp") == true, "not hidden with both games unchecked")
+        setChecked({ [hsKey] = false, [sc2Key] = false, [UI.APPS_KEY] = true })
+        assert(hidden("TwoGamesAndApp") == true, "the Battle.net row kept a friend whose games are unchecked")
+    end)
+end)
+
+property("Feature: friends-list-filter, Example tests: app presence rules, legacy entries", function()
+    -- Only App:nil false: the Apps row is checked.
+    local db = { checkedGames = { ["App:nil"] = false } }
+    local UI = loadUI(db)
+    assert(UI.IsAppsChecked() == true, "App:nil false alone must leave the Apps row checked")
+    assert(db.checkedGames["App:nil"] == false and db.checkedGames["@apps"] == nil, "IsAppsChecked wrote or deleted")
+
+    -- Only BSAp:nil false: checked as well.
+    db = { checkedGames = { ["BSAp:nil"] = false } }
+    UI = loadUI(db)
+    assert(UI.IsAppsChecked() == true, "BSAp:nil false alone must leave the Apps row checked")
+
+    -- Both false: unchecked, and neither entry is deleted by reading or writing the new state.
+    db = { checkedGames = { ["App:nil"] = false, ["BSAp:nil"] = false, ["CLNT:nil"] = false } }
+    UI = loadUI(db)
+    assert(UI.IsAppsChecked() == false, "both legacy entries false must give an unchecked Apps row")
+    assert(db.checkedGames["@apps"] == nil, "reading wrote @apps")
+    UI.SetAppsChecked(true)
+    assert(UI.IsAppsChecked() == true and db.checkedGames["@apps"] == true, "SetAppsChecked(true) not stored")
+    UI.SetAppsChecked(false)
+    assert(db.checkedGames["@apps"] == false, "SetAppsChecked(false) not stored")
+    assert(db.checkedGames["App:nil"] == false and db.checkedGames["BSAp:nil"] == false
+        and db.checkedGames["CLNT:nil"] == false, "a legacy entry was deleted or changed")
+
+    -- A stored @apps boolean wins over the legacy entries.
+    db = { checkedGames = { ["@apps"] = true, ["App:nil"] = false, ["BSAp:nil"] = false } }
+    UI = loadUI(db)
+    assert(UI.IsAppsChecked() == true, "@apps true must beat the legacy entries")
+end)
+
+property("Feature: friends-list-filter, Example tests: app presence rules, window row, click and Reset", function()
+    local friends = {
+        { name = "ForeverFriend", accounts = { gameAcct("WoW", WOW_FOREVER) } },
+        { name = "DesktopOnly", accounts = { appAcct("App") } },
+        { name = "MobileOnly", accounts = { appAcct("BSAp") } },
+    }
+    withBattleNetFriends(friends, function()
+        withOptions(function(env, ctx)
+            local db = env.ns.db
+            db.showPlayerCounts = false
+            loadModule("Friends", env.ns)
+            loadModule("Games", env.ns)
+            env.reapplies = {}
+            env.ns.Filter = { Reapply = function() env.reapplies[#env.reapplies + 1] = true end }
+            env.UI.Show()
+
+            local checks = {}
+            for _, f in ipairs(ctx.created) do
+                if f.kind == "CheckButton" and f.template == "UICheckButtonTemplate" and f.shown then
+                    checks[#checks + 1] = f
+                end
+            end
+            local function textOf(check)
+                for _, fs in ipairs(env.fontStrings) do
+                    for _, c in ipairs(fs.calls) do
+                        if c[1] == "SetPoint" and c[3] == check then return rawget(fs, "text") end
+                    end
+                end
+            end
+            local labels, appsCheck, battlenetRows = {}, nil, 0
+            for _, c in ipairs(checks) do
+                local t = textOf(c)
+                labels[#labels + 1] = tostring(t)
+                assert(not tostring(t):find("Mobile"), "a Battle.net Mobile row exists: " .. tostring(t))
+                if t == "Battle.net" then battlenetRows = battlenetRows + 1; appsCheck = c end
+            end
+            assert(#checks == 3, "expected WoW Forever, Battle.net and Offline rows, got: " .. table.concat(labels, "; "))
+            assert(battlenetRows == 1 and appsCheck, "expected one Battle.net row, got: " .. table.concat(labels, "; "))
+            assert(appsCheck.checked == true, "Apps row not checked by default")
+
+            -- Clicking the Apps row writes checkedGames["@apps"] and then calls Reapply.
+            local seen
+            env.ns.Filter.Reapply = function()
+                env.reapplies[#env.reapplies + 1] = true
+                seen = db.checkedGames["@apps"]
+            end
+            appsCheck.checked = false
+            appsCheck.scripts.OnClick(appsCheck)
+            assert(db.checkedGames["@apps"] == false, "click did not write checkedGames[@apps]")
+            assert(#env.reapplies == 1 and seen == false, "click did not call Reapply after the write")
+            for k in pairs(db.checkedGames) do
+                assert(k == "@apps", "click wrote an extra key " .. show(k))
+            end
+
+            -- Reset to defaults leaves checkedGames["@apps"] unchanged and does not call Reapply.
+            local gear = ctx.find("Button", env.win)
+            gear.scripts.OnClick(gear)
+            local p = ctx.parts()
+            env.reapplies = {}
+            p.reset.scripts.OnClick(p.reset)
+            assert(db.checkedGames["@apps"] == false, "Reset changed checkedGames[@apps]")
+            assert(#env.reapplies == 0, "Reset called Reapply")
+        end)
+    end)
+end)
+
+property("Feature: friends-list-filter, Example tests: app presence rules, classic hook", function()
+    local T_DIVIDER, T_WOW, T_BNET = 1, 2, 3
+    local globalNames = { "print", "C_BattleNet", "FRIENDS_BUTTON_TYPE_DIVIDER", "FRIENDS_BUTTON_TYPE_WOW",
+        "FRIENDS_BUTTON_TYPE_BNET", "issecretvalue", "BNGetNumFriends" }
+    local saved = {}
+    for _, n in ipairs(globalNames) do saved[n] = _G[n] end
+
+    local friends = {
+        { accounts = { appAcct("BSAp") } },                              -- 1: mobile app only
+        { accounts = { gameAcct("WoW", WOW_FOREVER), appAcct("App") } }, -- 2: WoW Forever and the app
+        { accounts = { appAcct("App") } },                               -- 3: desktop app only
+        { accounts = { gameAcct("D3"), appAcct("BSAp") } },              -- 4: Diablo III and the app
+    }
+    FRIENDS_BUTTON_TYPE_DIVIDER, FRIENDS_BUTTON_TYPE_WOW, FRIENDS_BUTTON_TYPE_BNET = T_DIVIDER, T_WOW, T_BNET
+    issecretvalue = function() return false end
+    print = function() end
+    BNGetNumFriends = function() return #friends, #friends end
+    C_BattleNet = {
+        GetFriendAccountInfo = function(i)
+            local f = friends[i]
+            return f and { gameAccountInfo = f.primary or f.accounts[1] } or nil
+        end,
+        GetFriendNumGameAccounts = function(i) return #friends[i].accounts end,
+        GetFriendGameAccountInfo = function(i, j) return friends[i].accounts[j] end,
+    }
+
+    local hooks = {}
+    local scrollBox = setmetatable({}, { __index = function() return function() end end })
+    function scrollBox:SetDataProvider(p)
+        self.provider = p
+        for _, fn in ipairs(hooks) do fn(self, p) end
+    end
+    function scrollBox:GetDataProvider() return self.provider end
+    local function newProvider()
+        local p = { collection = {} }
+        for i = 1, #friends do p.collection[i] = { buttonType = T_BNET, id = i } end
+        function p:GetCollection() return self.collection end
+        function p:GetSize() return #self.collection end
+        function p:Flush() self.collection = {} end
+        function p:InsertTable(t) for _, e in ipairs(t) do self.collection[#self.collection + 1] = e end end
+        return p
+    end
+    local function ids(p)
+        local out = {}
+        for i, e in ipairs(p:GetCollection()) do out[i] = tostring(e.id) end
+        return table.concat(out, ",")
+    end
+
+    local Filter, ns, restore = loadFilter({
+        hooksecurefunc = function(_, _, fn) hooks[#hooks + 1] = fn end,
+        CreateFrame = function() return { RegisterEvent = function() end, SetScript = function() end } end,
+        FriendsListFrame = { ScrollBox = scrollBox, IsShown = function() return true end },
+    })
+    ns.db = { checkedGames = {} }
+    local ok, err = pcall(function()
+        Filter.Install()
+        local function run(map)
+            ns.db.checkedGames = map
+            local p = newProvider()
+            scrollBox:SetDataProvider(p)
+            return ids(p)
+        end
+        assert(run({}) == "1,2,3,4", "everything checked changed the list")
+        -- Apps row unchecked: app-only friends go, friends in a game follow the game.
+        local got = run({ ["@apps"] = false })
+        assert(got == "2,4", "Apps row unchecked: " .. got)
+        -- Apps row unchecked and WoW Forever unchecked: the WoW friend goes as well.
+        got = run({ ["@apps"] = false, [ns.UI.GameKey("WoW", WOW_FOREVER)] = false })
+        assert(got == "4", "Apps and WoW Forever unchecked: " .. got)
+        -- WoW Forever unchecked, Battle.net row checked: only the WoW friend goes.
+        got = run({ [ns.UI.GameKey("WoW", WOW_FOREVER)] = false, ["@apps"] = true })
+        assert(got == "1,3,4", "WoW Forever unchecked, Battle.net checked: " .. got)
+        -- Diablo III unchecked: the friend in Diablo III and the app goes.
+        got = run({ [ns.UI.GameKey("D3")] = false })
+        assert(got == "1,2,3", "Diablo III unchecked: " .. got)
+        -- Legacy entries only (both false, no @apps): the Apps row shows unchecked, so app-only friends go.
+        got = run({ ["App:nil"] = false, ["BSAp:nil"] = false })
+        assert(got == "2,4", "legacy App:nil and BSAp:nil false: " .. got)
+        -- Only one legacy entry false: the Apps row is checked, nothing goes.
+        got = run({ ["App:nil"] = false })
+        assert(got == "1,2,3,4", "legacy App:nil false alone: " .. got)
+    end)
+    restore()
+    for _, n in ipairs(globalNames) do _G[n] = saved[n] end
+    if not ok then error(err, 0) end
 end)
 
 ----------------------------------------------------------------------

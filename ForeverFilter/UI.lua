@@ -13,6 +13,7 @@ local HEADER_FONT_SIZE = 14
 local MIN_WINDOW_HEIGHT = 120
 local MAX_HEIGHT_FRACTION = 0.8
 local CHROME_HEIGHT = 66
+local OFFLINE_DIVIDER_HEIGHT = 1 + ROW_GAP  -- divider line plus the gap below it
 local ICON_RETRIES = 3
 local WIDTH_CHROME = 60
 local MIN_WIDTH_FRACTION = 0.15
@@ -46,6 +47,7 @@ end
 
 -- Same key as Friends.GroupByGame: project ID only counts for WoW.
 function UI.GameKey(game, projectID)
+    if game == "@apps" then return UI.APPS_KEY end
     local g = game or "?"
     local pid = nil
     if g == "WoW" then
@@ -263,6 +265,7 @@ end
 
 -- Missing or non-boolean entries count as checked. Never adds an entry.
 function UI.IsChecked(game, projectID)
+    if game == "@apps" then return UI.IsAppsChecked() end
     local v = getStore()[UI.GameKey(game, projectID)]
     if type(v) == "boolean" then
         return v
@@ -271,7 +274,181 @@ function UI.IsChecked(game, projectID)
 end
 
 function UI.SetChecked(game, projectID, checked)
+    if game == "@apps" then return UI.SetAppsChecked(checked) end
     getStore()[UI.GameKey(game, projectID)] = checked and true or false
+end
+
+-- Reserved key of the Battle.net apps row (same value as Friends.APPS_GAME).
+UI.APPS_KEY = "@apps"
+
+-- A boolean under APPS_KEY wins. Otherwise the row is unchecked only when both
+-- legacy app keys are false. Never writes or deletes an entry.
+function UI.IsAppsChecked()
+    local store = getStore()
+    local v = store[UI.APPS_KEY]
+    if type(v) == "boolean" then
+        return v
+    end
+    if store["App:nil"] == false and store["BSAp:nil"] == false then
+        return false
+    end
+    return true
+end
+
+function UI.SetAppsChecked(checked)
+    getStore()[UI.APPS_KEY] = checked and true or false
+end
+
+-- Reserved key of the Offline row. Every game key contains ":", so it never collides.
+UI.OFFLINE_KEY = "@offline"
+
+-- Missing or non-boolean entries count as checked. Never adds an entry.
+function UI.IsOfflineChecked()
+    local v = getStore()[UI.OFFLINE_KEY]
+    if type(v) == "boolean" then
+        return v
+    end
+    return true
+end
+
+function UI.SetOfflineChecked(checked)
+    getStore()[UI.OFFLINE_KEY] = checked and true or false
+end
+
+-- The divider above the Offline row shows only when a game row exists.
+function UI.OfflineDividerVisible(gameRowCount)
+    return type(gameRowCount) == "number" and gameRowCount > 0
+end
+
+-- True iff the friend is online, has games, and every game key is unchecked.
+function UI.ShouldHideFriend(friendGames, isOnline, isChecked)
+    if isOnline ~= true then return false end
+    if type(friendGames) ~= "table" or type(isChecked) ~= "function" then return false end
+    local any = false
+    for _, key in ipairs(friendGames) do
+        any = true
+        if isChecked(key) ~= false then return false end
+    end
+    return any
+end
+
+-- True iff the friend is not online and the Offline row is unchecked.
+function UI.ShouldHideOfflineFriend(isOnline, isChecked)
+    return isOnline ~= true and isChecked == false
+end
+
+-- Element decision: unknown or non-Battle.net elements are always kept.
+function UI.ShouldHideBnetElement(isBnetFriend, isOnline, keys, isChecked, offlineChecked)
+    if isBnetFriend ~= true then return false end
+    if isOnline == nil then return false end
+    if isOnline == true then
+        return UI.ShouldHideFriend(keys, true, isChecked)
+    end
+    if isOnline == false then
+        return UI.ShouldHideOfflineFriend(false, offlineChecked)
+    end
+    return false
+end
+
+local function nonEmptyString(v)
+    if type(v) == "string" and v ~= "" then return v end
+    return nil
+end
+
+-- Game key of one online game account, same rules as Friends.GetAll + Friends.GroupByGame.
+local function keyOfGameInfo(info)
+    local game = nonEmptyString(info.clientProgram)
+    local pid = info.wowProjectID
+    if not (type(pid) == "number" and pid > 0) then pid = nil end
+    return UI.GameKey(game, pid)
+end
+
+-- Game keys of one friend, first-seen order, no duplicates. Uses every online
+-- game account; falls back to primaryInfo when none qualifies.
+function UI.FriendGameKeys(gameInfos, primaryInfo)
+    local keys, seen = {}, {}
+    local F = ns.Friends
+    if type(F) ~= "table" or type(F.PresenceGames) ~= "function" then return keys end
+    for _, info in ipairs(F.PresenceGames(gameInfos, primaryInfo) or {}) do
+        if type(info) == "table" then
+            local key
+            if F.IsAppClient(nonEmptyString(info.clientProgram)) then
+                key = UI.APPS_KEY
+            else
+                key = keyOfGameInfo(info)
+            end
+            if not seen[key] then
+                seen[key] = true
+                keys[#keys + 1] = key
+            end
+        end
+    end
+    return keys
+end
+
+-- Returns isOnline (true, false or nil when unknown) and the friend's game keys.
+function UI.FriendState(accountInfo, gameInfos)
+    if type(accountInfo) ~= "table" then return nil, {} end
+    local primary = accountInfo.gameAccountInfo
+    if type(primary) ~= "table" or type(primary.isOnline) ~= "boolean" then
+        return nil, {}
+    end
+    local keys = UI.FriendGameKeys(gameInfos, primary)
+    return (primary.isOnline or #keys > 0), keys
+end
+
+-- Returns kept (a new list), hiddenCount. shouldHide is only called for non-dividers.
+-- With nothing hidden the input is copied as is. Otherwise hidden elements are dropped
+-- and dividers that lead, trail, or follow another divider are dropped too.
+function UI.FilterElements(elements, shouldHide, isDivider)
+    local kept, hidden = {}, 0
+    for _, e in ipairs(elements or {}) do
+        if isDivider(e) or not shouldHide(e) then
+            kept[#kept + 1] = e
+        else
+            hidden = hidden + 1
+        end
+    end
+    if hidden == 0 then return kept, 0 end
+
+    -- afterCount[i]: true when a non-divider exists at a position after i.
+    local n = #kept
+    local nonDividerAfter = {}
+    local seen = false
+    for i = n, 1, -1 do
+        nonDividerAfter[i] = seen
+        if not isDivider(kept[i]) then seen = true end
+    end
+
+    local result, seenBefore, lastIsDivider = {}, false, false
+    for i = 1, n do
+        local e = kept[i]
+        if isDivider(e) then
+            if seenBefore and nonDividerAfter[i] and not lastIsDivider then
+                result[#result + 1] = e
+                lastIsDivider = true
+            end
+        else
+            result[#result + 1] = e
+            seenBefore = true
+            lastIsDivider = false
+        end
+    end
+    return result, hidden
+end
+
+-- Failure latch for the friends list filter. state = { disabled, announced }.
+-- "error" and "blocked" disable filtering; the first one returns action "announce".
+-- Never mutates its input.
+function UI.NextFilterGuard(state, event)
+    local disabled = type(state) == "table" and state.disabled == true
+    local announced = type(state) == "table" and state.announced == true
+    if event == "error" or event == "blocked" then
+        local action = nil
+        if not announced then action = "announce" end
+        return { disabled = true, announced = true }, action
+    end
+    return { disabled = disabled, announced = announced }, nil
 end
 
 -- Returns the saved-variables table (ns.db, else ForeverFilterDB, created if missing).
@@ -787,10 +964,11 @@ local function create()
     content:SetSize(FRAME_WIDTH - 60, 1)
     scrollFrame:SetScrollChild(content)
 
-    frame.noFriends = content:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    frame.noFriends:SetPoint("TOPLEFT", 0, 0)
-    frame.noFriends:SetText("No Battle.net friends found.")
-    frame.noFriends:Hide()
+    -- Thin line above the Offline row, shown only when game rows exist.
+    frame.offlineDivider = content:CreateTexture(nil, "ARTWORK")
+    frame.offlineDivider:SetHeight(1)
+    frame.offlineDivider:SetColorTexture(1, 1, 1, 0.2)
+    frame.offlineDivider:Hide()
 
     tinsert(UISpecialFrames, "ForeverFilterFrame")
 
@@ -831,7 +1009,14 @@ local function getRow(i)
         local check = CreateFrame("CheckButton", nil, content, "UICheckButtonTemplate")
         check:SetSize(CHECK_SIZE, CHECK_SIZE)
         check:SetScript("OnClick", function(self)
-            UI.SetChecked(self.game, self.projectID, self:GetChecked())
+            if self.offline then
+                UI.SetOfflineChecked(self:GetChecked())
+            else
+                UI.SetChecked(self.game, self.projectID, self:GetChecked())
+            end
+            if ns.Filter and ns.Filter.Reapply then
+                ns.Filter.Reapply()
+            end
         end)
         local header = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         local fontPath = GameFontNormal and GameFontNormal.GetFont and GameFontNormal:GetFont()
@@ -874,18 +1059,13 @@ function UI.Refresh()
     local nameFn = ns.Games and ns.Games.GetGameName or nil
     local rows = (ns.Friends and ns.Friends.GroupByGame and ns.Friends.GroupByGame(entries, nameFn)) or {}
 
+    -- The Offline row is always present, so the list is never empty.
+    local gameRowCount = #rows
+    local offlineCount = (ns.Friends and ns.Friends.CountOffline and ns.Friends.CountOffline(entries)) or 0
+    local all = {}
+    for i, row in ipairs(rows) do all[i] = row end
+    all[#all + 1] = { offline = true, count = offlineCount }
     local isEmpty = false
-    if #entries == 0 then
-        frame.noFriends:SetText("No Battle.net friends found.")
-        frame.noFriends:Show()
-        isEmpty = true
-    elseif #rows == 0 then
-        frame.noFriends:SetText("No friends online.")
-        frame.noFriends:Show()
-        isEmpty = true
-    else
-        frame.noFriends:Hide()
-    end
 
     local scale = frame:GetScale()
     local stripH = optionsOpen and UI.StripHeight(scale) or 0
@@ -897,10 +1077,15 @@ function UI.Refresh()
     -- Pass 1 (width): measure each header at the widest allowed width.
     local anyPending = false
     local textWidths = {}
-    for i, row in ipairs(rows) do
+    for i, row in ipairs(all) do
         local r = getRow(i)
         r.header:SetWidth(UI.HeaderWidth(maxWindowWidth))
-        local text, pending = UI.HeaderText(row)
+        local text, pending
+        if row.offline then
+            text = UI.FormatHeader("Offline", "", row.count, UI.ReadShowCounts(ns.db))
+        else
+            text, pending = UI.HeaderText(row)
+        end
         r.header:SetText(text)
         if pending then
             anyPending = true
@@ -916,12 +1101,27 @@ function UI.Refresh()
 
     -- Pass 2 (height): lay out rows using heights measured at the final width.
     local y = 0
-    for i, row in ipairs(rows) do
+    local dividerShown = UI.OfflineDividerVisible(gameRowCount)
+    frame.offlineDivider:Hide()
+    for i, row in ipairs(all) do
         local r = lines[i]
+        if row.offline and dividerShown then
+            frame.offlineDivider:ClearAllPoints()
+            frame.offlineDivider:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
+            frame.offlineDivider:SetPoint("TOPRIGHT", content, "TOPRIGHT", 0, -y)
+            frame.offlineDivider:Show()
+            y = y + OFFLINE_DIVIDER_HEIGHT
+        end
+        r.check.offline = row.offline and true or nil
         r.check.game, r.check.projectID = row.game, row.wowProjectID
         r.check:ClearAllPoints()
         r.check:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
-        r.check:SetChecked(UI.IsChecked(row.game, row.wowProjectID))
+        if row.offline then
+            r.check:SetChecked(UI.IsOfflineChecked())
+        else
+            -- The "@apps" row is an ordinary game row: IsChecked routes it to IsAppsChecked.
+            r.check:SetChecked(UI.IsChecked(row.game, row.wowProjectID))
+        end
         r.check:Show()
 
         r.header:SetWidth(headerWidth)
@@ -935,11 +1135,8 @@ function UI.Refresh()
         end
         y = y + UI.RowHeight(h) + ROW_GAP
     end
-    local rowArea = 0
-    if #rows > 0 then
-        rowArea = y - ROW_GAP
-    end
-    for i = #rows + 1, #lines do
+    local rowArea = y - ROW_GAP
+    for i = #all + 1, #lines do
         lines[i].header:SetText("")
         lines[i].header:Hide()
         lines[i].check:Hide()
