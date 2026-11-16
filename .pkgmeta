@@ -10,6 +10,7 @@ ignore:
   - "*.code-workspace"
   - README.md
   - description.md
+  - RELEASING.md
   - resources
 
 manual-changelog:
