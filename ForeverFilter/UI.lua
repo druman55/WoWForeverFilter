@@ -13,6 +13,10 @@ local HEADER_FONT_SIZE = 14
 local MIN_WINDOW_HEIGHT = 120
 local MAX_HEIGHT_FRACTION = 0.8
 local CHROME_HEIGHT = 66
+local NAME_ROW_HEIGHT = 28    -- label and edit box row, window units
+local HEADING_HEIGHT = 20     -- "Game Filter" line, window units
+local TOP_AREA_HEIGHT = NAME_ROW_HEIGHT + HEADING_HEIGHT
+local NAME_MAX_LETTERS = 64
 local OFFLINE_DIVIDER_HEIGHT = 1 + ROW_GAP  -- divider line plus the gap below it
 local ICON_RETRIES = 3
 local WIDTH_CHROME = 60
@@ -34,6 +38,7 @@ local optionsButton, optionsStrip
 local optionsOpen = false
 local sliderDragging = false  -- used by the slider handlers
 local syncing = false         -- used by the slider sync code
+local nameText = ""           -- raw text of the Name input, session only, never saved
 local lines = {}
 local refreshPending = false
 local retriesLeft = ICON_RETRIES
@@ -337,6 +342,56 @@ function UI.ShouldHideOfflineFriend(isOnline, isChecked)
     return isOnline ~= true and isChecked == false
 end
 
+-- Returns the input with leading and trailing whitespace removed, "" for non-strings.
+function UI.NameQuery(input)
+    if type(input) ~= "string" then return "" end
+    return (input:match("^%s*(.-)%s*$")) or ""
+end
+
+-- ASCII-only lowercase: only A-Z change, every other byte is untouched.
+function UI.AsciiLower(s)
+    if type(s) ~= "string" then return "" end
+    return (s:gsub("[A-Z]", function(c) return string.char(c:byte() + 32) end))
+end
+
+-- True when query occurs (plain text, ASCII case-insensitive) in a non-empty string entry.
+function UI.NameMatch(query, names)
+    if type(query) ~= "string" or query == "" or type(names) ~= "table" then return false end
+    local q = UI.AsciiLower(query)
+    for i = 1, table.maxn(names) do
+        local name = names[i]
+        if type(name) == "string" and name ~= "" and UI.AsciiLower(name):find(q, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Name decision for one friend: false for an empty query, else hidden unless a name matches.
+function UI.NameFilterHides(query, names)
+    if type(query) ~= "string" or query == "" then return false end
+    return not UI.NameMatch(query, names)
+end
+
+-- Stores the raw name text. Non-strings become "".
+function UI.SetNameText(text)
+    if type(text) ~= "string" then text = "" end
+    nameText = text
+end
+
+-- The trimmed name query for the current session text.
+function UI.GetNameQuery()
+    return UI.NameQuery(nameText)
+end
+
+-- Name input changed: store the text and reapply the filter. No Refresh, no saved data.
+function UI.OnNameChanged(text)
+    UI.SetNameText(text)
+    if ns.Filter and ns.Filter.Reapply then
+        ns.Filter.Reapply()
+    end
+end
+
 -- Element decision: unknown or non-Battle.net elements are always kept.
 function UI.ShouldHideBnetElement(isBnetFriend, isOnline, keys, isChecked, offlineChecked)
     if isBnetFriend ~= true then return false end
@@ -597,7 +652,7 @@ function UI.NextSocialState(state, event, ctx)
     elseif event == "social_hidden" then
         if c.anySocialOpen ~= true then
             dismissed = false
-            if autoOpened and c.windowShown == true then
+            if c.windowShown == true then
                 action = "hide"
             end
         end
@@ -895,6 +950,23 @@ function UI.HandleScaleCommand(argText)
     end
 end
 
+local nameLabel, nameInput, gameHeading
+
+-- Anchors the Name label, edit box and heading below the options strip.
+local function layoutNameFilter(stripH)
+    if not (frame and nameLabel and nameInput and gameHeading) then
+        return
+    end
+    local parent = frame.InsetBg or frame
+    nameLabel:ClearAllPoints()
+    nameLabel:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, -(8 + stripH + 4))
+    nameInput:ClearAllPoints()
+    nameInput:SetPoint("LEFT", nameLabel, "RIGHT", 8, 0)
+    nameInput:SetPoint("RIGHT", parent, "RIGHT", -28, 0)
+    gameHeading:ClearAllPoints()
+    gameHeading:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, -(8 + stripH + NAME_ROW_HEIGHT))
+end
+
 local function create()
     frame = CreateFrame("Frame", "ForeverFilterFrame", UIParent, "BasicFrameTemplateWithInset")
     frame:SetScale(UI.GetScale())
@@ -959,6 +1031,32 @@ local function create()
     scrollFrame = CreateFrame("ScrollFrame", "ForeverFilterScrollFrame", frame, "UIPanelScrollFrameTemplate")
     scrollFrame:SetPoint("TOPLEFT", frame.InsetBg or frame, "TOPLEFT", 8, -8)
     scrollFrame:SetPoint("BOTTOMRIGHT", frame.InsetBg or frame, "BOTTOMRIGHT", -28, 8)
+
+    nameLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    nameLabel:SetText("Name")
+    local okE, box = pcall(CreateFrame, "EditBox", nil, frame, "InputBoxTemplate")
+    if not (okE and box) then
+        box = CreateFrame("EditBox", nil, frame)
+        box:SetFontObject("ChatFontNormal")
+    end
+    box:SetAutoFocus(false)
+    box:SetMaxLetters(NAME_MAX_LETTERS)
+    box:SetHeight(20)
+    box:SetText(nameText)
+    box:SetScript("OnTextChanged", function(self)
+        UI.OnNameChanged(self:GetText())
+    end)
+    box:SetScript("OnEscapePressed", function(self)
+        self:ClearFocus()
+    end)
+    box:SetScript("OnEnterPressed", function(self)
+        self:ClearFocus()
+    end)
+    nameInput = box
+    gameHeading = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    gameHeading:SetText("Game Filter")
+    gameHeading:SetJustifyH("LEFT")
+    layoutNameFilter(0)
 
     content = CreateFrame("Frame", nil, scrollFrame)
     content:SetSize(FRAME_WIDTH - 60, 1)
@@ -1040,7 +1138,7 @@ function UI.HeaderText(row)
         label = val(row.game)
     end
     local debugId = ""
-    if ns.db and ns.db.debug then
+    if ns.debug then
         if type(row.wowProjectID) == "number" then
             debugId = string.format(" [id: %d]", row.wowProjectID)
         elseif row.game == "WoW" then
@@ -1143,19 +1241,21 @@ function UI.Refresh()
     end
     content:SetHeight(math.max(1, rowArea))
 
-    local windowHeight = UI.ComputeWindowHeightWithStrip(rowArea, UIParent:GetHeight(), isEmpty, stripH)
+    local topArea = TOP_AREA_HEIGHT
+    local windowHeight = UI.ComputeWindowHeightWithStrip(rowArea, UIParent:GetHeight(), isEmpty, stripH + topArea)
     frame:SetHeight(windowHeight)
     if optionsStrip then
         optionsStrip:SetHeight(math.max(1, stripH))
     end
+    layoutNameFilter(stripH)
     scrollFrame:ClearAllPoints()
-    scrollFrame:SetPoint("TOPLEFT", frame.InsetBg or frame, "TOPLEFT", 8, -(8 + stripH))
+    scrollFrame:SetPoint("TOPLEFT", frame.InsetBg or frame, "TOPLEFT", 8, -(8 + stripH + topArea))
     scrollFrame:SetPoint("BOTTOMRIGHT", frame.InsetBg or frame, "BOTTOMRIGHT", -28, 8)
     if left and top then
         frame:ClearAllPoints()
         frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
     end
-    if CHROME_HEIGHT + stripH + rowArea <= windowHeight then
+    if CHROME_HEIGHT + stripH + topArea + rowArea <= windowHeight then
         scrollFrame:SetVerticalScroll(0)
     end
 

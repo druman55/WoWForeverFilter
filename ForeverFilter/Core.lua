@@ -3,7 +3,13 @@ local ADDON_NAME, ns = ...
 ns.name = ADDON_NAME
 
 local getMeta = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
-ns.version = (getMeta and getMeta(ADDON_NAME, "Version")) or "?"
+local metaVersion = getMeta and getMeta(ADDON_NAME, "Version")
+if type(metaVersion) ~= "string" or metaVersion == "" or metaVersion:find("@project-version@", 1, true) then
+    metaVersion = "dev"
+end
+ns.version = metaVersion
+-- Session-only debug flag; never saved.
+ns.debug = false
 
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
@@ -23,9 +29,8 @@ SlashCmdList["FOREVERFILTER"] = function(msg)
     local cmd = strtrim(msg or ""):lower()
     print("|cff33ff99Forever Filter|r v" .. ns.version)
     if cmd == "debug" then
-        ns.db = ns.db or ForeverFilterDB or {}
-        ns.db.debug = not ns.db.debug
-        print("ForeverFilter debug " .. (ns.db.debug and "ON" or "OFF"))
+        ns.debug = not ns.debug
+        print("ForeverFilter debug " .. (ns.debug and "ON" or "OFF"))
         if ns.UI and ns.UI.Show then
             ns.UI.Show() -- shows the panel if hidden and refreshes it
         end

@@ -2,8 +2,14 @@
 ## Title: Forever Filter
 ## Notes: Filter your Battle.net friends list by the game they are playing.
 ## Author: druma
-## Version: 0.1.0
+## Version: @project-version@
+## Category: User Interface
+## IconTexture: Interface\Icons\achievement_guildperk_everybodysfriend
 ## SavedVariables: ForeverFilterDB
+# TODO(release): replace the value below with the CurseForge project ID (About Project box).
+## X-Curse-Project-ID: REPLACE_WITH_CURSEFORGE_PROJECT_ID
+# TODO(release): replace the value below with the Wago project ID (developer dashboard).
+## X-Wago-ID: REPLACE_WITH_WAGO_PROJECT_ID
 
 Core.lua
 Friends.lua

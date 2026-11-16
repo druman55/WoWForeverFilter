@@ -1,0 +1,15 @@
+package-as: ForeverFilter
+
+move-folders:
+  ForeverFilter/ForeverFilter: ForeverFilter
+
+ignore:
+  - tests
+  - deploy.cmd
+  - deploy.ps1
+  - "*.code-workspace"
+  - README.md
+
+manual-changelog:
+  filename: CHANGELOG.md
+  markup-type: markdown

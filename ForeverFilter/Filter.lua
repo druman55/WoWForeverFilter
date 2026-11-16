@@ -43,14 +43,20 @@ end
 
 -- Runs apply for one list under pcall. A failure latches the guard.
 local function run(kind, scrollBox, provider)
-    if guard.disabled then
-        return
-    end
     local apply = appliers[kind]
     if type(apply) ~= "function" then
         return
     end
-    local ok = pcall(apply, scrollBox, provider)
+    if guard.disabled then
+        -- Game filtering is off. Continue only for a name query or to
+        -- restore a list we already filtered.
+        local UI = ns.UI
+        local query = type(UI) == "table" and type(UI.GetNameQuery) == "function" and UI.GetNameQuery() or ""
+        if (query == nil or query == "") and not snapshots[kind] then
+            return
+        end
+    end
+    local ok = pcall(apply, scrollBox, provider, not guard.disabled)
     if not ok then
         feedGuard("error")
     end
@@ -89,7 +95,7 @@ end
 
 -- Idempotent. Safe to call from PLAYER_LOGIN and ADDON_LOADED.
 function Filter.Install()
-    if Filter.MODE ~= "provider" or guard.disabled then
+    if Filter.MODE ~= "provider" then
         return
     end
     installOne("classic", classicScrollBox())
@@ -163,9 +169,72 @@ local function readGameInfo(info)
     return { isOnline = online, clientProgram = program, wowProjectID = projectID }
 end
 
+---------------------------------------------------------------------------
+-- Name filter: reading names and the per-pass decision
+---------------------------------------------------------------------------
+
+-- Skips nil, secret, non-string and empty values.
+local function addName(names, v)
+    if v ~= nil and not isSecret(v) and type(v) == "string" and v ~= "" then
+        names[#names + 1] = v
+    end
+end
+
+-- Friend names of one Battle.net friend. May raise; call only under pcall.
+-- A secret or non-table account or game info is skipped as a whole.
+local function readFriendNames(friendIndex)
+    local names = {}
+    local account = C_BattleNet.GetFriendAccountInfo(friendIndex)
+    if type(account) == "table" and not isSecret(account) then
+        addName(names, account.accountName)
+        addName(names, account.battleTag)
+    end
+    local count = C_BattleNet.GetFriendNumGameAccounts(friendIndex)
+    if type(count) == "number" and not isSecret(count) then
+        for i = 1, count do
+            local info = C_BattleNet.GetFriendGameAccountInfo(friendIndex, i)
+            if type(info) == "table" and not isSecret(info) then
+                addName(names, info.characterName)
+                addName(names, info.realmName)
+                addName(names, info.richPresence)
+            end
+        end
+    end
+    return names
+end
+
+-- Returns friendIndex -> true (hide) / false (keep), or nil when the name
+-- filter does not apply to this pass (empty query or any error).
+-- Never raises and never touches the guard.
+local function buildNameHidden(friendIndexes)
+    local UI = ns.UI
+    if type(UI) ~= "table" or type(UI.GetNameQuery) ~= "function" then
+        return nil
+    end
+    local query = UI.GetNameQuery()
+    if query == nil or query == "" then
+        return nil
+    end
+    local ok, result = pcall(function()
+        local hidden = {}
+        for _, idx in ipairs(friendIndexes) do
+            hidden[idx] = UI.NameFilterHides(query, readFriendNames(idx))
+        end
+        return hidden
+    end)
+    if ok then
+        return result
+    end
+    return nil
+end
+
+-- Exposed for the applier sections and tests.
+Filter.readFriendNames = readFriendNames
+Filter.buildNameHidden = buildNameHidden
+
 -- Decides whether one friend (account info + game accounts) is hidden.
 -- Any nil or secret value keeps the friend.
-local function shouldHideFriendByIndex(friendIndex, offlineChecked)
+local function gameHides(friendIndex, offlineChecked)
     if type(friendIndex) ~= "number" or isSecret(friendIndex) then
         return false
     end
@@ -202,7 +271,7 @@ local function classicIsDivider(e)
     return type(e) == "table" and e.buttonType == FRIENDS_BUTTON_TYPE_DIVIDER
 end
 
-local function applyClassic(_, provider)
+local function applyClassic(_, provider, gameEnabled)
     if type(provider) ~= "table" or type(provider.GetCollection) ~= "function" then
         return
     end
@@ -216,11 +285,38 @@ local function applyClassic(_, provider)
     end
 
     local offlineChecked = ns.UI.IsOfflineChecked()
+
+    -- Name decision for the whole pass, computed under its own pcall.
+    local ids = {}
+    for _, e in ipairs(snap.elements) do
+        if type(e) == "table" and e.buttonType == FRIENDS_BUTTON_TYPE_BNET
+            and not isSecret(e.id) and type(e.id) == "number" then
+            ids[#ids + 1] = e.id
+        end
+    end
+    local nameHidden = buildNameHidden(ids)
+
     local function shouldHide(e)
-        if type(e) ~= "table" or e.buttonType ~= FRIENDS_BUTTON_TYPE_BNET then
+        if type(e) ~= "table" then
             return false
         end
-        return shouldHideFriendByIndex(e.id, offlineChecked)
+        if e.buttonType == FRIENDS_BUTTON_TYPE_BNET then
+            if gameEnabled ~= false and gameHides(e.id, offlineChecked) then
+                return true
+            end
+            if nameHidden ~= nil then
+                local id = e.id
+                if isSecret(id) or type(id) ~= "number" then
+                    return true
+                end
+                return nameHidden[id] ~= false
+            end
+            return false
+        end
+        if FRIENDS_BUTTON_TYPE_WOW ~= nil and e.buttonType == FRIENDS_BUTTON_TYPE_WOW then
+            return nameHidden ~= nil
+        end
+        return false
     end
 
     local kept = ns.UI.FilterElements(snap.elements, shouldHide, classicIsDivider)
@@ -269,7 +365,14 @@ local function totalChildren(headers)
     return n
 end
 
-local function applySocial(_, provider)
+-- Whether a SocialUI node is a non-Battle.net friend. Returns false until the
+-- SocialUI data shape for such friends is verified in game.
+local function isNonBnetFriendNode(_)
+    return false
+end
+Filter.isNonBnetFriendNode = isNonBnetFriendNode
+
+local function applySocial(_, provider, gameEnabled)
     if type(provider) ~= "table" or type(provider.GetRootNode) ~= "function"
         or type(provider.Invalidate) ~= "function" then
         return
@@ -290,12 +393,45 @@ local function applySocial(_, provider)
     end
 
     local offlineChecked = ns.UI.IsOfflineChecked()
+    local function nodeData(node)
+        return type(node) == "table" and type(node.GetData) == "function" and node:GetData() or nil
+    end
+
+    -- Name decision for the whole pass, computed under its own pcall.
+    local ids = {}
+    for _, entry in ipairs(snap.headers) do
+        for _, node in ipairs(entry.nodes) do
+            local data = nodeData(node)
+            if type(data) == "table" and not isSecret(data.friendIndex)
+                and type(data.friendIndex) == "number" then
+                ids[#ids + 1] = data.friendIndex
+            end
+        end
+    end
+    local nameHidden = buildNameHidden(ids)
+
     local function shouldHide(node)
-        local data = type(node) == "table" and type(node.GetData) == "function" and node:GetData() or nil
-        if type(data) ~= "table" or data.friendIndex == nil then
+        local data = nodeData(node)
+        if type(data) ~= "table" then
             return false
         end
-        return shouldHideFriendByIndex(data.friendIndex, offlineChecked)
+        if Filter.isNonBnetFriendNode(data) then
+            return nameHidden ~= nil
+        end
+        if data.friendIndex == nil then
+            return false
+        end
+        if gameEnabled ~= false and gameHides(data.friendIndex, offlineChecked) then
+            return true
+        end
+        if nameHidden ~= nil then
+            local id = data.friendIndex
+            if isSecret(id) or type(id) ~= "number" then
+                return true
+            end
+            return nameHidden[id] ~= false
+        end
+        return false
     end
 
     local removedAny = false
@@ -366,7 +502,7 @@ local function reapplyOne(kind, scrollBox)
 end
 
 function Filter.Reapply()
-    if guard.disabled or Filter.MODE ~= "provider" then
+    if Filter.MODE ~= "provider" then
         return
     end
     if not snapshots.classic and not snapshots.social then

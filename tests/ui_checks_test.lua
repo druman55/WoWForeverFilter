@@ -458,7 +458,8 @@ property("Feature: game-filter-checkboxes, Property 6: Header text is independen
 
     for i = 1, ITERATIONS do
         local debug = random() < 0.5
-        local UI, ns = loadUI({ debug = debug or nil, checkedGames = genStore() })
+        local UI, ns = loadUI({ checkedGames = genStore() })
+        ns.debug = debug
         local withGames = random() < 0.5
         if withGames then
             ns.Games = { FormatGame = function(game, pid) return stubFormat(game, pid) end }
@@ -959,7 +960,8 @@ end)
 property("Feature: game-list-polish, Property 7: Header text requests a 20 px icon with the row sub-icon", function()
     for i = 1, ITERATIONS do
         local debug = random() < 0.5
-        local UI, ns = loadUI({ debug = debug or nil })
+        local UI, ns = loadUI({})
+        ns.debug = debug
         local calls = {}
         local pendingResult = random() < 0.5
         ns.Games = {
@@ -1160,7 +1162,8 @@ property("Feature: game-list-polish, Example tests: UI.Refresh sizing, anchoring
         local heights = callsOf(mainFrame, "SetHeight")
         assert(#heights == 1, "SetHeight called " .. #heights .. " times")
         -- friends-list-filter 5.1: five game rows plus the Offline row (24 + 6 gap) and the 7 px divider.
-        local withOffline = fiveRows + 24 + 6 + 7
+        -- name-filter-input 2.7: plus the 48 px top area (Name row and heading).
+        local withOffline = fiveRows + 24 + 6 + 7 + 48
         assert(heights[1][2] == withOffline, "SetHeight(" .. tostring(heights[1][2]) .. ") ~= " .. withOffline)
 
         -- Requirement 2.5: re-anchored by TOPLEFT after the height change.
@@ -2048,7 +2051,7 @@ property("Feature: social-menu-attach, Property 10: Social menu transition decis
 
         local expectShow = event == "social_shown" and not ctx.windowShown and not state.dismissed
         local expectHide = event == "social_hidden" and not ctx.anySocialOpen
-            and state.autoOpened and ctx.windowShown
+            and ctx.windowShown
 
         assert((action == "show") == expectShow, "show decision wrong: " .. where)
         assert((action == "hide") == expectHide, "hide decision wrong: " .. where)
@@ -3020,7 +3023,8 @@ property("Feature: options-panel, Task 1.14: Example tests for the pure layer", 
     assert(UIempty.HeaderText(row) == expected, "HeaderText with empty db: " .. show((UIempty.HeaderText(row))))
 
     -- Counts off with debug on: the id text stays, the count goes.
-    local UIoff = loadUI({ showPlayerCounts = false, debug = true })
+    local UIoff, nsOff = loadUI({ showPlayerCounts = false })
+    nsOff.debug = true
     local wowRow = { game = "WoW", wowProjectID = 11, count = 3 }
     local text = UIoff.HeaderText(wowRow)
     assert(text == "WoW [id: 11]", "counts off + debug: " .. show(text))
@@ -4615,7 +4619,8 @@ property("Feature: friends-list-filter, Example tests: Offline row, divider and 
             local t = rawget(f, "text")
             assert(not (type(t) == "string" and t:lower():find("no friends")), "empty-state message shown")
         end
-        local want = env.UI.ComputeWindowHeight(env.UI.RowHeight(nil), 1080, false)
+        -- name-filter-input 2.7: the window includes the top area (Name row and heading, 48).
+        local want = env.UI.ComputeWindowHeight(env.UI.RowHeight(nil) + 48, 1080, false)
         assert(flLastHeight(env.win) == want, "height " .. tostring(flLastHeight(env.win)) .. " vs " .. want)
         assert(want > 120 or want == 120)
     end)
@@ -4648,7 +4653,7 @@ property("Feature: friends-list-filter, Example tests: Offline row, divider and 
         assert(divY == -(2 * (rh + ROW_GAP)), "divider y " .. tostring(divY))
         assert(offY == divY - DIVIDER_H, "offline y " .. tostring(offY) .. " divider y " .. tostring(divY))
         local area = 3 * rh + 2 * ROW_GAP + DIVIDER_H
-        assert(flLastHeight(env.win) == env.UI.ComputeWindowHeight(area, 1080, false), "height with divider")
+        assert(flLastHeight(env.win) == env.UI.ComputeWindowHeight(area + 48, 1080, false), "height with divider")
 
         -- Counts off: no count on the Offline label.
         env.ns.db.showPlayerCounts = false
@@ -5506,6 +5511,1511 @@ property("Feature: friends-list-filter, Example tests: app presence rules, class
     end)
     restore()
     for _, n in ipairs(globalNames) do _G[n] = saved[n] end
+    if not ok then error(err, 0) end
+end)
+
+----------------------------------------------------------------------
+-- Feature: name-filter-input, Property 1: NameQuery trims whitespace and rejects non-strings
+-- Validates: Requirements 3.5, 3.6, 7.1, 7.2
+----------------------------------------------------------------------
+property("Feature: name-filter-input, Property 1: NameQuery trims whitespace and rejects non-strings", function()
+    local UI = loadUI({})
+    local WS = { " ", "\t", "\n", "\r", "\v", "\f" }
+    local WS_SET = {}
+    for _, c in ipairs(WS) do WS_SET[c] = true end
+
+    local function genPad()
+        local t = {}
+        for j = 1, random(0, 10) do t[j] = pick(WS) end
+        return table.concat(t)
+    end
+
+    -- Core: any string that does not start or end with whitespace, interior whitespace allowed.
+    local function genCore()
+        local s = genString()
+        local a, b = 1, #s
+        while a <= b and WS_SET[s:sub(a, a)] do a = a + 1 end
+        while b >= a and WS_SET[s:sub(b, b)] do b = b - 1 end
+        s = s:sub(a, b)
+        if random() < 0.3 and s ~= "" then
+            s = s .. pick(WS) .. "x" .. pick(WS) .. "y"
+        end
+        return s
+    end
+
+    local nonStrings = { 0, 1.5, -3, true, false, {}, { "x" }, function() end }
+
+    for i = 1, ITERATIONS do
+        local core = genCore()
+        local input = genPad() .. core .. genPad()
+        local ok, got = pcall(UI.NameQuery, input)
+        assert(ok, "NameQuery raised for " .. show(input) .. ": " .. tostring(got))
+        assert(got == core, string.format("NameQuery(%s) = %s, expected %s", show(input), show(got), show(core)))
+
+        -- Whitespace-only input gives "".
+        local blank = genPad()
+        assert(UI.NameQuery(blank) == "", "whitespace-only gave non-empty for " .. show(blank))
+
+        -- Non-string input gives "" without raising.
+        local v = pick(nonStrings)
+        local ok2, got2 = pcall(UI.NameQuery, v)
+        assert(ok2, "NameQuery raised for " .. type(v) .. ": " .. tostring(got2))
+        assert(got2 == "", "non-string " .. type(v) .. " gave " .. show(got2))
+    end
+
+    assert(UI.NameQuery(nil) == "")
+    assert(UI.NameQuery() == "")
+    assert(UI.NameQuery("") == "")
+    assert(UI.NameQuery("  a b  ") == "a b")
+end)
+
+----------------------------------------------------------------------
+-- Generators for name matching: pattern characters, ASCII and non-ASCII letters.
+----------------------------------------------------------------------
+local NAME_PIECES = { "%", ".", "[", "]", "(", ")", "*", "+", "-", "?", "^", "$", "%a", "[a-z]", ".*",
+    "É", "é", "a", "A", "b", "B", "z", "Z", "Ann", "bob", "#1234", " ", "0", "_" }
+
+local function genNameText()
+    local r = random()
+    if r < 0.05 then return "" end
+    local t = {}
+    for i = 1, random(1, 5) do t[i] = pick(NAME_PIECES) end
+    return table.concat(t)
+end
+
+-- A list with strings (some derived from a query), empty strings, non-strings and nil holes.
+local function genNameList(query)
+    local list = {}
+    local n = random(0, 8)
+    for i = 1, n do
+        local r = random()
+        if r < 0.45 then list[i] = genNameText()
+        elseif r < 0.55 and type(query) == "string" then
+            -- a name that contains the query, possibly with changed ASCII case
+            local s = genNameText() .. query .. genNameText()
+            if random() < 0.5 then s = s:upper() end
+            list[i] = s
+        elseif r < 0.62 then list[i] = ""
+        elseif r < 0.72 then list[i] = pick({ 0, 1.5, -3, 42 })
+        elseif r < 0.8 then list[i] = pick({ true, false })
+        elseif r < 0.88 then list[i] = {}
+        elseif r < 0.92 then list[i] = function() end
+        end -- else leave a nil hole
+    end
+    return list
+end
+
+----------------------------------------------------------------------
+-- Feature: name-filter-input, Property 2: NameMatch is a plain, ASCII case-insensitive substring test
+-- Validates: Requirements 3.2, 3.3, 3.4, 3.9, 7.3, 7.4, 7.5, 7.6, 7.8
+----------------------------------------------------------------------
+property("Feature: name-filter-input, Property 2: NameMatch is a plain, ASCII case-insensitive substring test", function()
+    local UI = loadUI({})
+
+    -- Independent oracle: byte loops only, no string.find, no patterns.
+    local function lowerAscii(s)
+        local out = {}
+        for i = 1, #s do
+            local b = s:byte(i)
+            if b >= 65 and b <= 90 then b = b + 32 end
+            out[i] = string.char(b)
+        end
+        return table.concat(out)
+    end
+    local function contains(hay, needle)
+        for start = 1, #hay - #needle + 1 do
+            local same = true
+            for k = 1, #needle do
+                if hay:byte(start + k - 1) ~= needle:byte(k) then same = false; break end
+            end
+            if same then return true end
+        end
+        return false
+    end
+    local function oracle(query, list)
+        if type(query) ~= "string" or query == "" or type(list) ~= "table" then return false end
+        local q = lowerAscii(query)
+        local top = 0
+        for k in pairs(list) do
+            if type(k) == "number" and k > top then top = k end
+        end
+        for i = 1, top do
+            local name = list[i]
+            if type(name) == "string" and name ~= "" and contains(lowerAscii(name), q) then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function copyList(list)
+        local c = {}
+        for k, v in pairs(list) do c[k] = v end
+        return c
+    end
+
+    for i = 1, ITERATIONS do
+        local query = genNameText()
+        local list = genNameList(query)
+        local before = copyList(list)
+
+        local ok, got = pcall(UI.NameMatch, query, list)
+        assert(ok, "NameMatch raised for " .. show(query) .. ": " .. tostring(got))
+        assert(type(got) == "boolean", "NameMatch returned " .. type(got))
+        local want = oracle(query, list)
+        assert(got == want, string.format("NameMatch(%s, ...) = %s, oracle %s", show(query), tostring(got), tostring(want)))
+
+        -- Arguments unchanged.
+        for k, v in pairs(before) do assert(rawequal(list[k], v), "list entry changed at " .. tostring(k)) end
+        for k in pairs(list) do assert(before[k] ~= nil, "list gained key " .. tostring(k)) end
+
+        -- Non-ASCII case differences do not match; ASCII case differences do.
+        assert(UI.NameMatch("É", { "xéx" }) == false, "É matched é")
+        assert(UI.NameMatch("é", { "xÉx" }) == false, "é matched É")
+
+        -- A pattern-heavy query against a name built from it matches literally.
+        local q2 = pick({ "%", ".", "[a-z]", "(", "a+", "^a", "a$", "-", "%a", ".*" })
+        assert(UI.NameMatch(q2, { "pre" .. q2 .. "post" }) == true, "literal " .. q2 .. " not found")
+
+        -- Non-table lists and non-string queries give false.
+        local junk = pick({ 0, 1.5, true, false, "str", function() end })
+        assert(UI.NameMatch(query, junk) == false, "non-table list gave true")
+        assert(UI.NameMatch(junk, list) == false or type(junk) == "string", "non-string query gave true")
+        assert(UI.NameMatch(nil, list) == false, "nil query gave true")
+        assert(UI.NameMatch(query, nil) == false, "nil list gave true")
+    end
+
+    -- Edge cases.
+    assert(UI.NameMatch("a", {}) == false)
+    assert(UI.NameMatch("a", { 1, true, {} }) == false)
+    assert(UI.NameMatch("", { "a" }) == false)
+    assert(UI.NameMatch("A", { "a" }) == true)
+    assert(UI.NameMatch("b", { nil, nil, "abc" }) == true, "nil hole stopped the scan")
+end)
+
+----------------------------------------------------------------------
+-- Feature: name-filter-input, Property 3: A name matches itself
+-- Validates: Requirements 7.7
+----------------------------------------------------------------------
+property("Feature: name-filter-input, Property 3: A name matches itself", function()
+    local UI = loadUI({})
+
+    for i = 1, ITERATIONS do
+        local name = genNameText()
+        if name == "" then name = "x" .. name end
+
+        assert(UI.NameMatch(name, { name }) == true, "name did not match itself: " .. show(name))
+
+        -- Still matches when surrounded by other entries, junk and nil holes.
+        local list = genNameList(nil)
+        local pos = random(1, #list + 1)
+        table.insert(list, pos, name)
+        assert(UI.NameMatch(name, list) == true, "name did not match itself in a mixed list: " .. show(name))
+
+        -- Also in its upper-case and lower-case ASCII forms.
+        local asciiOnly = not name:find("[\128-\255]")
+        if asciiOnly then
+            assert(UI.NameMatch(name:upper(), { name }) == true, "upper-case name missed: " .. show(name))
+            assert(UI.NameMatch(name:lower(), { name }) == true, "lower-case name missed: " .. show(name))
+        end
+
+        -- A trimmed query built from the name matches the name when it is non-empty.
+        local q = UI.NameQuery(name)
+        if q ~= "" then
+            assert(UI.NameMatch(q, { name }) == true, "trimmed name missed: " .. show(name))
+        end
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: name-filter-input, Property 4: NameMatch is invariant under ASCII case changes
+-- Validates: Requirements 3.3, 7.8
+----------------------------------------------------------------------
+property("Feature: name-filter-input, Property 4: NameMatch is invariant under ASCII case changes", function()
+    local UI = loadUI({})
+
+    -- Flips the case of random ASCII letters only; every other byte is kept.
+    local function flipAscii(s)
+        return (s:gsub("%a", function(c)
+            if random() < 0.5 then
+                return c:find("%u") and c:lower() or c:upper()
+            end
+        end))
+    end
+
+    local function flipList(list)
+        local out = {}
+        for i = 1, table.maxn(list) do
+            local v = list[i]
+            if type(v) == "string" then v = flipAscii(v) end
+            out[i] = v
+        end
+        return out
+    end
+
+    for i = 1, ITERATIONS do
+        local query = genNameText()
+        local list = genNameList(query)
+        local base = UI.NameMatch(query, list)
+
+        local q2, l2 = flipAscii(query), flipList(list)
+        assert(UI.NameMatch(q2, list) == base,
+            "query case change altered result: " .. show(query) .. " -> " .. show(q2))
+        assert(UI.NameMatch(query, l2) == base,
+            "name case change altered result for query " .. show(query))
+        assert(UI.NameMatch(q2, l2) == base,
+            "both case changes altered result: " .. show(query) .. " -> " .. show(q2))
+        assert(UI.NameMatch(query:upper(), list) == UI.NameMatch(query:lower(), list) or query:find("[\128-\255]"),
+            "upper/lower query differ for ASCII query " .. show(query))
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: name-filter-input, Property 5: Whitespace around the query does not change the result
+-- Validates: Requirements 7.9
+----------------------------------------------------------------------
+property("Feature: name-filter-input, Property 5: Whitespace around the query does not change the result", function()
+    local UI = loadUI({})
+    local WS = { " ", "\t", "\n", "\r", "\v", "\f" }
+
+    local function genPad()
+        local t = {}
+        for k = 1, random(1, 10) do t[k] = pick(WS) end
+        return table.concat(t)
+    end
+
+    for i = 1, ITERATIONS do
+        local q = genNameText()
+        local list = genNameList(q)
+        local padded = genPad() .. q .. genPad()
+
+        local want = UI.NameMatch(UI.NameQuery(q), list)
+        local got = UI.NameMatch(UI.NameQuery(padded), list)
+        assert(got == want, string.format("padding changed result for %s: %s vs %s",
+            show(q), tostring(got), tostring(want)))
+
+        -- Padding on one side only.
+        assert(UI.NameMatch(UI.NameQuery(genPad() .. q), list) == want, "leading padding changed result for " .. show(q))
+        assert(UI.NameMatch(UI.NameQuery(q .. genPad()), list) == want, "trailing padding changed result for " .. show(q))
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: name-filter-input, Property 6: Invalid entries do not change the result
+-- Validates: Requirements 3.9, 7.4
+----------------------------------------------------------------------
+property("Feature: name-filter-input, Property 6: Invalid entries do not change the result", function()
+    local UI = loadUI({})
+
+    -- nil is represented by a skipped slot (a hole).
+    local function genJunk()
+        local r = random(6)
+        if r == 1 then return nil
+        elseif r == 2 then return ""
+        elseif r == 3 then return pick({ 0, 1.5, -3, 42 })
+        elseif r == 4 then return pick({ true, false })
+        elseif r == 5 then return {}
+        else return function() end end
+    end
+
+    -- Copies list, adding junk before, between and after the original entries.
+    local function withJunk(list)
+        local out, n = {}, 0
+        local function addJunk()
+            for _ = 1, random(0, 3) do
+                n = n + 1
+                out[n] = genJunk()
+            end
+        end
+        addJunk()
+        for i = 1, table.maxn(list) do
+            n = n + 1
+            out[n] = list[i]
+            addJunk()
+        end
+        return out
+    end
+
+    for i = 1, ITERATIONS do
+        local query = genNameText()
+        local list = genNameList(query)
+        local want = UI.NameMatch(query, list)
+        local got = UI.NameMatch(query, withJunk(list))
+        assert(got == want, string.format("junk changed result for %s: %s vs %s",
+            show(query), tostring(got), tostring(want)))
+
+        -- Junk only: never a match.
+        local onlyJunk = {}
+        for k = 1, random(0, 6) do onlyJunk[k] = genJunk() end
+        assert(UI.NameMatch(query, onlyJunk) == false, "junk-only list matched " .. show(query))
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: name-filter-input, Property 7: The name decision hides unless the query is empty or a name matches
+-- Validates: Requirements 3.1, 3.2, 3.6, 6.3
+----------------------------------------------------------------------
+property("Feature: name-filter-input, Property 7: The name decision hides unless the query is empty or a name matches", function()
+    local UI = loadUI({})
+
+    -- Independent oracle: plain substring over ASCII-lowered valid entries.
+    local function lower(s) return (s:gsub("%u", function(c) return c:lower() end)) end
+    local function oracleMatch(q, list)
+        local lq = lower(q)
+        for i = 1, table.maxn(list) do
+            local n = list[i]
+            if type(n) == "string" and n ~= "" and lower(n):find(lq, 1, true) then return true end
+        end
+        return false
+    end
+
+    for i = 1, ITERATIONS do
+        -- Empty and non-string queries never hide, whatever the names are.
+        local list = genNameList(genNameText())
+        local noQuery = pick({ "", "", false, 0, {}, true })
+        assert(UI.NameFilterHides(nil, list) == false, "nil query hid")
+        assert(UI.NameFilterHides(noQuery, list) == false, "empty/non-string query hid")
+        assert(UI.NameFilterHides("", nil) == false, "empty query with nil names hid")
+        assert(UI.NameFilterHides("", {}) == false, "empty query with no names hid")
+
+        -- Non-empty query: hidden exactly when no name matches.
+        local query = genNameText()
+        if query == "" then query = "q" end
+        local names = genNameList(query)
+        local got = UI.NameFilterHides(query, names)
+        assert(type(got) == "boolean", "result is not a boolean")
+        local want = not oracleMatch(query, names)
+        assert(got == want, string.format("query %s: got %s want %s", show(query), tostring(got), tostring(want)))
+        assert(got == not UI.NameMatch(query, names), "disagrees with NameMatch")
+
+        -- No usable names (nil, non-table, empty, junk only) hides a non-empty query.
+        assert(UI.NameFilterHides(query, nil) == true, "nil names did not hide")
+        assert(UI.NameFilterHides(query, "text") == true, "non-table names did not hide")
+        assert(UI.NameFilterHides(query, { "", false, 7 }) == true, "junk-only names did not hide")
+
+        -- A name containing the query keeps the friend.
+        assert(UI.NameFilterHides(query, { "x" .. query .. "y" }) == false, "containing name hid")
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: name-filter-input, Task 1.9: Example tests for matching
+-- Validates: Requirements 3.3, 3.4, 7.5, 7.8, 7.10
+----------------------------------------------------------------------
+property("Feature: name-filter-input, Task 1.9: Example tests for matching", function()
+    local UI = loadUI({})
+
+    -- One case per pattern character. Each query is plain text: it matches a name that holds
+    -- it literally, and does not match a name that a Lua pattern reading of it would match.
+    local cases = {
+        { char = "%", query = "%a",  hit = "50%a",  miss = "abc" },
+        { char = ".", query = "a.c", hit = "xa.cx", miss = "abc" },
+        { char = "[", query = "[a", hit = "x[ay",   miss = "a" },
+        { char = "]", query = "a]", hit = "xa]y",   miss = "a" },
+        { char = "(", query = "(a", hit = "x(ay",   miss = "a" },
+        { char = ")", query = "a)", hit = "xa)y",   miss = "a" },
+        { char = "*", query = "a*", hit = "xa*y",   miss = "aaa" },
+        { char = "+", query = "a+", hit = "xa+y",   miss = "aaa" },
+        { char = "-", query = "a-", hit = "xa-y",   miss = "aaa" },
+        { char = "?", query = "a?", hit = "xa?y",   miss = "ab" },
+        { char = "^", query = "^a", hit = "x^ay",   miss = "ab" },
+        { char = "$", query = "a$", hit = "xa$y",   miss = "ba" },
+    }
+    for _, c in ipairs(cases) do
+        assert(UI.NameMatch(c.char, { "x" .. c.char .. "y" }) == true, "lone " .. c.char .. " did not match itself")
+        assert(UI.NameMatch(c.char, { "plain" }) == false, "lone " .. c.char .. " matched a name without it")
+        assert(UI.NameMatch(c.query, { c.hit }) == true, "literal " .. c.query .. " did not match " .. c.hit)
+        assert(UI.NameMatch(c.query, { c.miss }) == false, "pattern reading of " .. c.query .. " matched " .. c.miss)
+        assert(UI.NameMatch(c.query, { "zzz", c.hit }) == true, c.query .. " missed a later name")
+    end
+
+    -- ASCII letters fold, non-ASCII letters do not.
+    assert(UI.NameMatch("A", { "a" }) == true, "A did not match a")
+    assert(UI.NameMatch("a", { "A" }) == true, "a did not match A")
+    assert(UI.NameMatch("\195\137", { "\195\169" }) == false, "E-acute matched e-acute")
+    assert(UI.NameMatch("\195\137", { "\195\137" }) == true, "E-acute did not match itself")
+
+    -- A non-table list is never a match.
+    for _, bad in ipairs({ "a", 1, true, false }) do
+        assert(UI.NameMatch("a", bad) == false, "non-table list matched: " .. tostring(bad))
+    end
+    assert(UI.NameMatch("a", nil) == false, "nil list matched")
+end)
+
+----------------------------------------------------------------------
+-- Feature: name-filter-input, Property 11: Typing never changes saved variables
+--
+-- Validates: Requirements 5.3, 5.4
+----------------------------------------------------------------------
+property("Feature: name-filter-input, Property 11: Typing never changes saved variables", function()
+    local function deepCopy(v, seen)
+        if type(v) ~= "table" then return v end
+        seen = seen or {}
+        if seen[v] then return seen[v] end
+        local c = {}
+        seen[v] = c
+        for k, x in pairs(v) do c[deepCopy(k, seen)] = deepCopy(x, seen) end
+        return c
+    end
+    local function deepEqual(a, b)
+        if type(a) ~= "table" or type(b) ~= "table" then return rawequal(a, b) end
+        for k, v in pairs(a) do if not deepEqual(v, b[k]) then return false end end
+        for k in pairs(b) do if a[k] == nil then return false end end
+        return true
+    end
+    local function genDbValue(depth)
+        local r = random()
+        if depth < 2 and r < 0.3 then
+            local t = {}
+            for i = 1, random(0, 4) do t[genString() .. i] = genDbValue(depth + 1) end
+            return t
+        end
+        if r < 0.5 then return random() < 0.5 end
+        if r < 0.75 then return random(-100, 100) end
+        return genString()
+    end
+
+    local savedGlobal = ForeverFilterDB
+    for i = 1, ITERATIONS do
+        local db = {
+            checkedGames = { WoW = random() < 0.5, D3 = random() < 0.5 },
+            offlineChecked = random() < 0.5,
+            window = { left = random(0, 500), top = random(0, 500), scale = 1 },
+            extra = genDbValue(0),
+        }
+        ForeverFilterDB = db
+        local before = deepCopy(db)
+
+        local UI, ns = loadUI(db)
+        local calls = 0
+        ns.Filter = { Reapply = function() calls = calls + 1 end }
+
+        local nTyped = random(1, 6)
+        for _ = 1, nTyped do
+            local text
+            local r = random()
+            if r < 0.15 then text = pick({ nil, false, 0, {}, true })
+            else text = genNameText() end
+            UI.OnNameChanged(text)
+        end
+
+        assert(ForeverFilterDB == db, "ForeverFilterDB was replaced")
+        assert(ns.db == db, "ns.db was replaced")
+        assert(deepEqual(before, db), "saved variables changed by typing")
+        assert(calls == nTyped, "Reapply not called once per change")
+
+        -- Without a Filter module, typing still leaves the saved data alone.
+        ns.Filter = nil
+        UI.OnNameChanged(genNameText())
+        assert(deepEqual(before, db), "saved variables changed when Filter is absent")
+    end
+    ForeverFilterDB = savedGlobal
+end)
+
+----------------------------------------------------------------------
+-- Feature: name-filter-input, Example tests for the window
+--
+-- Validates: Requirements 1.1, 1.2, 2.1, 2.3, 2.4, 2.5, 2.6, 2.7, 5.1, 5.5
+----------------------------------------------------------------------
+property("Feature: name-filter-input, Example tests: Name label, edit box, heading, layout and session text", function()
+    local saved = { CreateFrame = CreateFrame, UIParent = UIParent }
+
+    -- Recording frame with script storage and edit box text state.
+    local frames = {}
+    local function recFrame(name, kind)
+        local f = { calls = {}, name = name, kind = kind, scripts = {}, hooks = {}, text = "" }
+        local fixed = {
+            IsShown = true, GetLeft = 100, GetTop = 500, GetWidth = 300,
+            GetHeight = 1080, GetStringHeight = 14, GetChecked = true, GetStringWidth = 100,
+        }
+        local absent = { TitleText = true, TitleContainer = true, InsetBg = true }
+        setmetatable(f, { __index = function(t, key)
+            if absent[key] then return nil end
+            return function(self, ...)
+                t.calls[#t.calls + 1] = { key, ... }
+                if key == "CreateFontString" then return recFrame(nil, "FontString") end
+                if key == "CreateTexture" then return recFrame() end
+                if key == "SetText" then t.text = (...) end
+                if key == "GetText" then return t.text end
+                if key == "SetScript" then t.scripts[(...)] = select(2, ...) end
+                if key == "HookScript" then
+                    t.hooks[(...)] = t.hooks[(...)] or {}
+                    table.insert(t.hooks[(...)], (select(2, ...)))
+                end
+                return fixed[key]
+            end
+        end })
+        frames[#frames + 1] = f
+        return f
+    end
+    local function callsOf(f, method)
+        local out = {}
+        for _, c in ipairs(f.calls) do
+            if c[1] == method then out[#out + 1] = c end
+        end
+        return out
+    end
+    local function fire(f, event)
+        if f.scripts[event] then f.scripts[event](f) end
+        for _, h in ipairs(f.hooks[event] or {}) do h(f) end
+    end
+    local function hasText(t)
+        for _, f in ipairs(frames) do
+            if f.kind == "FontString" then
+                for _, c in ipairs(callsOf(f, "SetText")) do
+                    if c[2] == t then return true end
+                end
+            end
+        end
+        return false
+    end
+
+    local ok, err = pcall(function()
+        local mainFrame, scroll, box, content
+        CreateFrame = function(kindName, name, parent)
+            local f = recFrame(name, kindName)
+            if name == "ForeverFilterFrame" then mainFrame = f end
+            if name == "ForeverFilterScrollFrame" then scroll = f end
+            if kindName == "EditBox" and not box then box = f end
+            if kindName == "Frame" and not name and scroll and parent == scroll and not content then content = f end
+            return f
+        end
+        UIParent = recFrame("UIParent")
+        UIParent.GetWidth = function() return 1920 end
+
+        local UI, ns = loadUI({})
+        loadFriends(ns)
+        ns.Games = nil
+        local entries = {} -- zero game rows
+        ns.Friends.GetAll = function() return entries end
+        ns.Filter = nil
+
+        -- A fresh load starts with an empty query (session only).
+        assert(UI.GetNameQuery() == "", "fresh load has a non-empty query")
+
+        UI.Show()
+        assert(mainFrame and box and scroll, "window, edit box or scroll frame was not created")
+
+        -- Requirements 1.1, 1.2: label "Name", heading "Game Filter", also with zero game rows.
+        assert(hasText("Name"), "no Name label")
+        assert(hasText("Game Filter"), "no Game Filter heading with zero game rows")
+
+        -- Requirement 2.1 and 2.3 (limits and initial text).
+        local ml = callsOf(box, "SetMaxLetters")
+        assert(#ml == 1 and ml[1][2] == 64, "SetMaxLetters(64) not called once")
+        assert(box.text == "", "initial text is not empty: " .. tostring(box.text))
+        assert(#callsOf(box, "SetAutoFocus") == 1 and callsOf(box, "SetAutoFocus")[1][2] == false,
+            "SetAutoFocus(false) not called")
+
+        -- Requirements 2.4, 2.5: Escape and Enter clear focus and keep the text.
+        for _, event in ipairs({ "OnEscapePressed", "OnEnterPressed" }) do
+            box.text = "keep me"
+            box.calls = {}
+            assert(type(box.scripts[event]) == "function", event .. " handler missing")
+            box.scripts[event](box)
+            assert(#callsOf(box, "ClearFocus") == 1, event .. " did not call ClearFocus once")
+            assert(#callsOf(box, "SetText") == 0 and box.text == "keep me", event .. " changed the text")
+        end
+        box.text = ""
+
+        -- Requirements 2.6, 2.7: window height is 66 + topArea + rowArea; scroll offset has the top area.
+        local topArea = 28 + 20
+        local rowArea
+        local function checkLayout(label)
+            local cs = callsOf(content, "SetHeight")
+            rowArea = cs[#cs][2]
+            local hs = callsOf(mainFrame, "SetHeight")
+            assert(hs[#hs][2] == 66 + topArea + rowArea, string.format("%s: height %s ~= 66 + %d + %d",
+                label, tostring(hs[#hs][2]), topArea, rowArea))
+            local top
+            for _, c in ipairs(callsOf(scroll, "SetPoint")) do
+                if c[2] == "TOPLEFT" then top = c end
+            end
+            assert(top and top[6] == -(8 + topArea), label .. ": scroll top offset is " .. tostring(top and top[6]))
+        end
+        checkLayout("zero game rows")
+
+        entries = {}
+        for i = 1, 5 do entries[i] = { name = "F" .. i, isOnline = true, game = "G" .. i } end
+        UI.Refresh()
+        checkLayout("five game rows")
+
+        -- Requirement 5.1: OnTextChanged calls Filter.Reapply once.
+        local reapplies = 0
+        ns.Filter = { Reapply = function() reapplies = reapplies + 1 end }
+        box.text = "ann"
+        box.scripts.OnTextChanged(box)
+        assert(reapplies == 1, "Reapply called " .. reapplies .. " times")
+        assert(UI.GetNameQuery() == "ann", "typed text not stored")
+
+        -- Requirement 5.5: the text survives hide and show.
+        fire(mainFrame, "OnHide")
+        assert(box.text == "ann" and UI.GetNameQuery() == "ann", "text lost on hide")
+        fire(mainFrame, "OnShow")
+        assert(box.text == "ann" and UI.GetNameQuery() == "ann", "text lost on show")
+        assert(#callsOf(box, "SetText") == 0 or box.text == "ann", "hide/show reset the edit box")
+
+        -- A fresh load of UI.lua has an empty query again.
+        local UI2 = loadUI({})
+        assert(UI2.GetNameQuery() == "", "second fresh load has a non-empty query")
+    end)
+
+    CreateFrame = saved.CreateFrame
+    UIParent = saved.UIParent
+    assert(ok, err)
+end)
+
+----------------------------------------------------------------------
+-- Feature: name-filter-input, Property 8: Filtering combines the game decision and the name decision
+--
+-- Validates: Requirements 3.1, 3.2, 3.7, 3.8, 4.1, 4.2, 4.3, 4.4, 4.5, 5.2, 6.1, 6.2, 6.3
+----------------------------------------------------------------------
+property("Feature: name-filter-input, Property 8: Filtering combines the game decision and the name decision", function()
+    local T_DIVIDER, T_WOW, T_BNET, T_INVITE_HEADER, T_INVITE = 1, 2, 3, 4, 5
+    local SECRET = {}
+    local globalNames = { "print", "C_BattleNet", "FRIENDS_BUTTON_TYPE_DIVIDER", "FRIENDS_BUTTON_TYPE_WOW",
+        "FRIENDS_BUTTON_TYPE_BNET", "issecretvalue" }
+    local savedGlobals = {}
+    for _, n in ipairs(globalNames) do savedGlobals[n] = _G[n] end
+
+    local namePool = { "Ann", "ann", "ANNA", "Bob#1234", "Zoë", "zoË", "a.b", "a%b", "[x]", "(y)", "^$", "a*b+c-d?",
+        "Stormrage", "Area 52", "Raiding Karazhan", "Élan", "x" }
+    local programs = { "WoW", "D3", "WTCG" }
+
+    -- A name field: nil, empty, number, boolean, secret, or a string.
+    local function genNameField()
+        local r = random(20)
+        if r <= 4 then return nil end
+        if r == 5 then return "" end
+        if r == 6 then return random(100) end
+        if r == 7 then return true end
+        if r == 8 then return SECRET end
+        return pick(namePool)
+    end
+
+    local function genFriend()
+        local f = { nilAccount = random() < 0.05, games = {} }
+        f.online = random() < 0.7
+        if f.online then
+            for g = 1, random(1, 2) do
+                f.games[g] = { isOnline = true, clientProgram = pick(programs) }
+            end
+        else
+            f.games[1] = { isOnline = false, clientProgram = pick(programs) }
+        end
+        for _, info in ipairs(f.games) do
+            info.characterName, info.realmName, info.richPresence = genNameField(), genNameField(), genNameField()
+        end
+        f.accountName, f.battleTag = genNameField(), genNameField()
+        return f
+    end
+
+    local function lower(s) return (s:gsub("[A-Z]", function(c) return string.char(c:byte() + 32) end)) end
+    local function readable(list, v)
+        if type(v) == "string" and v ~= "" then list[#list + 1] = v end
+    end
+    local function friendNames(f)
+        local names = {}
+        if not f.nilAccount then readable(names, f.accountName); readable(names, f.battleTag) end
+        for _, info in ipairs(f.games) do
+            readable(names, info.characterName); readable(names, info.realmName); readable(names, info.richPresence)
+        end
+        return names
+    end
+    local function flipCase(s)
+        return (s:gsub("%a", function(c) return random() < 0.5 and c:upper() or c:lower() end))
+    end
+
+    local ok, err = pcall(function()
+        FRIENDS_BUTTON_TYPE_DIVIDER, FRIENDS_BUTTON_TYPE_WOW, FRIENDS_BUTTON_TYPE_BNET = T_DIVIDER, T_WOW, T_BNET
+        issecretvalue = function(v) return v == SECRET end
+        print = function() end
+
+        local friends
+        C_BattleNet = {
+            GetFriendAccountInfo = function(i)
+                local f = friends[i]
+                if not f or f.nilAccount then return nil end
+                return { accountName = f.accountName, battleTag = f.battleTag, gameAccountInfo = f.games[1] }
+            end,
+            GetFriendNumGameAccounts = function(i) return #friends[i].games end,
+            GetFriendGameAccountInfo = function(i, j) return friends[i].games[j] end,
+        }
+
+        local Filter, ns, restore = loadFilter({})
+        local ok2, err2 = pcall(function()
+            local UI = ns.UI
+            local function newProvider(list)
+                local p = { collection = {} }
+                for i, e in ipairs(list) do p.collection[i] = e end
+                function p:GetCollection() return self.collection end
+                function p:GetSize() return #self.collection end
+                function p:Flush() self.collection = {} end
+                function p:InsertTable(t) for _, e in ipairs(t) do self.collection[#self.collection + 1] = e end end
+                return p
+            end
+
+            for i = 1, ITERATIONS do
+                friends = {}
+                for k = 1, random(0, 8) do friends[k] = genFriend() end
+
+                -- Saved check state: each game and the Offline row unchecked with some probability.
+                local checked = {}
+                for _, prog in ipairs(programs) do
+                    if random() < 0.4 then checked[UI.GameKey(prog)] = false end
+                end
+                if random() < 0.4 then checked[UI.OFFLINE_KEY] = false end
+                ns.db = { checkedGames = checked }
+
+                -- Element list: Battle.net friends, non-Battle.net friends, dividers and invites in random order.
+                local elements = {}
+                for k = 1, #friends do elements[#elements + 1] = { buttonType = T_BNET, id = k } end
+                for k = 1, random(0, 3) do elements[#elements + 1] = { buttonType = T_WOW, id = 100 + k } end
+                for _ = 1, random(0, 3) do elements[#elements + 1] = { buttonType = T_DIVIDER, id = "d" } end
+                if random() < 0.3 then elements[#elements + 1] = { buttonType = T_INVITE_HEADER, id = "h" } end
+                if random() < 0.3 then elements[#elements + 1] = { buttonType = T_INVITE, id = "i" } end
+                for k = #elements, 2, -1 do
+                    local j = random(k)
+                    elements[k], elements[j] = elements[j], elements[k]
+                end
+
+                -- Query: empty, whitespace, a case-flipped piece of a real name, or random text.
+                local query = ""
+                local r = random()
+                if r < 0.15 then
+                    query = ""
+                elseif r < 0.25 then
+                    query = pick({ " ", "\t", "  \n" })
+                elseif r < 0.7 and #friends > 0 then
+                    local names = friendNames(friends[random(#friends)])
+                    if #names > 0 then
+                        local n = pick(names)
+                        local a = random(#n)
+                        query = flipCase(n:sub(a, random(a, #n)))
+                    else
+                        query = pick(namePool)
+                    end
+                else
+                    query = pick(namePool)
+                end
+                query = pick({ "", " ", "\t" }) .. query .. pick({ "", " ", "  " })
+                local trimmed = UI.NameQuery(query)
+
+                local function gameHides(f)
+                    if f.nilAccount then return false end
+                    if not f.online then return checked[UI.OFFLINE_KEY] == false end
+                    for _, info in ipairs(f.games) do
+                        if checked[UI.GameKey(info.clientProgram)] ~= false then return false end
+                    end
+                    return true
+                end
+                local function oracle(q)
+                    local hidden, pass = 0, {}
+                    for idx, e in ipairs(elements) do
+                        local hide = false
+                        if e.buttonType == T_BNET then
+                            local f = friends[e.id]
+                            hide = gameHides(f)
+                            if not hide and q ~= "" then
+                                local found = false
+                                for _, n in ipairs(friendNames(f)) do
+                                    if lower(n):find(lower(q), 1, true) then found = true end
+                                end
+                                hide = not found
+                            end
+                        elseif e.buttonType == T_WOW then
+                            hide = q ~= ""
+                        end
+                        pass[idx] = not hide
+                        if hide then hidden = hidden + 1 end
+                    end
+                    local out = {}
+                    if hidden == 0 then
+                        for _, e in ipairs(elements) do out[#out + 1] = e end
+                        return out
+                    end
+                    -- Dividers stay only between two kept friends (none leading, trailing, or doubled).
+                    local kept = {}
+                    for idx, e in ipairs(elements) do
+                        if e.buttonType == T_DIVIDER or pass[idx] then kept[#kept + 1] = e end
+                    end
+                    for idx, e in ipairs(kept) do
+                        if e.buttonType ~= T_DIVIDER then
+                            out[#out + 1] = e
+                        else
+                            local before, after = false, false
+                            for b = 1, idx - 1 do if kept[b].buttonType ~= T_DIVIDER then before = true end end
+                            for a = idx + 1, #kept do if kept[a].buttonType ~= T_DIVIDER then after = true end end
+                            local prev = out[#out]
+                            if before and after and prev and prev.buttonType ~= T_DIVIDER then out[#out + 1] = e end
+                        end
+                    end
+                    return out
+                end
+                local function same(a, b)
+                    if #a ~= #b then return false end
+                    for k = 1, #a do if a[k] ~= b[k] then return false end end
+                    return true
+                end
+                local function desc(list)
+                    local t = {}
+                    for k, e in ipairs(list) do t[k] = e.buttonType .. ":" .. tostring(e.id) end
+                    return table.concat(t, ",")
+                end
+
+                UI.SetNameText(query)
+                local provider = newProvider(elements)
+                Filter.run("classic", nil, provider)
+                local expected = oracle(trimmed)
+                assert(same(provider:GetCollection(), expected), string.format(
+                    "iteration %d: query %s: got [%s], expected [%s]", i, show(query),
+                    desc(provider:GetCollection()), desc(expected)))
+                assert(not Filter.IsDisabled(), "iteration " .. i .. ": guard latched")
+
+                -- Clearing the query leaves only the game decision.
+                UI.SetNameText("")
+                Filter.run("classic", nil, provider)
+                local gameOnly = oracle("")
+                assert(same(provider:GetCollection(), gameOnly), string.format(
+                    "iteration %d: empty query: got [%s], expected [%s]", i,
+                    desc(provider:GetCollection()), desc(gameOnly)))
+            end
+        end)
+        restore()
+        if not ok2 then error(err2, 0) end
+    end)
+
+    for _, n in ipairs(globalNames) do _G[n] = savedGlobals[n] end
+    assert(ok, err)
+end)
+
+----------------------------------------------------------------------
+-- Feature: name-filter-input, Property 9: A name filter error leaves the pass unfiltered by name and does not latch
+--
+-- Validates: Requirements 5.7, 6.4, 6.5
+----------------------------------------------------------------------
+property("Feature: name-filter-input, Property 9: A name filter error leaves the pass unfiltered by name and does not latch", function()
+    local T_DIVIDER, T_WOW, T_BNET = 1, 2, 3
+    local globalNames = { "print", "C_BattleNet", "FRIENDS_BUTTON_TYPE_DIVIDER", "FRIENDS_BUTTON_TYPE_WOW",
+        "FRIENDS_BUTTON_TYPE_BNET", "issecretvalue" }
+    local savedGlobals = {}
+    for _, n in ipairs(globalNames) do savedGlobals[n] = _G[n] end
+
+    local namePool = { "Ann", "ann", "ANNA", "Bob#1234", "Zoë", "a.b", "a%b", "[x]", "Stormrage", "Area 52",
+        "Raiding Karazhan", "Élan", "x" }
+    local programs = { "WoW", "D3", "WTCG" }
+
+    local function genNameField()
+        local r = random(10)
+        if r <= 2 then return nil end
+        if r == 3 then return "" end
+        return pick(namePool)
+    end
+    local function genFriend()
+        local f = { games = {}, online = random() < 0.7 }
+        if f.online then
+            for g = 1, random(1, 2) do f.games[g] = { isOnline = true, clientProgram = pick(programs) } end
+        else
+            f.games[1] = { isOnline = false, clientProgram = pick(programs) }
+        end
+        for _, info in ipairs(f.games) do
+            info.characterName, info.realmName, info.richPresence = genNameField(), genNameField(), genNameField()
+        end
+        f.accountName, f.battleTag = genNameField(), genNameField()
+        return f
+    end
+    local function lower(s) return (s:gsub("[A-Z]", function(c) return string.char(c:byte() + 32) end)) end
+    local function friendNames(f)
+        local names = {}
+        local function add(v) if type(v) == "string" and v ~= "" then names[#names + 1] = v end end
+        add(f.accountName); add(f.battleTag)
+        for _, info in ipairs(f.games) do add(info.characterName); add(info.realmName); add(info.richPresence) end
+        return names
+    end
+
+    local ok, err = pcall(function()
+        FRIENDS_BUTTON_TYPE_DIVIDER, FRIENDS_BUTTON_TYPE_WOW, FRIENDS_BUTTON_TYPE_BNET = T_DIVIDER, T_WOW, T_BNET
+        issecretvalue = function() return false end
+        local printed = 0
+        print = function() printed = printed + 1 end
+
+        local friends
+        local failOn = nil   -- "account" or "num": raise on the first such call of the pass
+        local function maybeFail(which)
+            if failOn == which then
+                failOn = nil
+                error("injected name read failure")
+            end
+        end
+        C_BattleNet = {
+            GetFriendAccountInfo = function(i)
+                maybeFail("account")
+                local f = friends[i]
+                return { accountName = f.accountName, battleTag = f.battleTag, gameAccountInfo = f.games[1] }
+            end,
+            GetFriendNumGameAccounts = function(i) maybeFail("num"); return #friends[i].games end,
+            GetFriendGameAccountInfo = function(i, j) return friends[i].games[j] end,
+        }
+
+        local Filter, ns, restore = loadFilter({})
+        local ok2, err2 = pcall(function()
+            local UI = ns.UI
+            local function newProvider(list)
+                local p = { collection = {} }
+                for i, e in ipairs(list) do p.collection[i] = e end
+                function p:GetCollection() return self.collection end
+                function p:GetSize() return #self.collection end
+                function p:Flush() self.collection = {} end
+                function p:InsertTable(t) for _, e in ipairs(t) do self.collection[#self.collection + 1] = e end end
+                return p
+            end
+
+            for i = 1, ITERATIONS do
+                friends = {}
+                for k = 1, random(1, 8) do friends[k] = genFriend() end
+                local checked = {}
+                for _, prog in ipairs(programs) do
+                    if random() < 0.4 then checked[UI.GameKey(prog)] = false end
+                end
+                if random() < 0.4 then checked[UI.OFFLINE_KEY] = false end
+                ns.db = { checkedGames = checked }
+
+                local elements = {}
+                for k = 1, #friends do elements[#elements + 1] = { buttonType = T_BNET, id = k } end
+                for k = 1, random(0, 3) do elements[#elements + 1] = { buttonType = T_WOW, id = 100 + k } end
+                for _ = 1, random(0, 3) do elements[#elements + 1] = { buttonType = T_DIVIDER, id = "d" } end
+                for k = #elements, 2, -1 do
+                    local j = random(k)
+                    elements[k], elements[j] = elements[j], elements[k]
+                end
+
+                -- Non-empty query: a piece of a real name when one exists, else a pool name.
+                local query
+                local names = friendNames(friends[random(#friends)])
+                if #names > 0 and random() < 0.7 then
+                    local n = pick(names)
+                    local a = random(#n)
+                    query = n:sub(a, random(a, #n))
+                else
+                    query = pick(namePool)
+                end
+                query = pick({ "", " " }) .. query .. pick({ "", "  " })
+                local trimmed = UI.NameQuery(query)
+                if trimmed == "" then query, trimmed = "x", "x" end
+
+                local function gameHides(f)
+                    if not f.online then return checked[UI.OFFLINE_KEY] == false end
+                    for _, info in ipairs(f.games) do
+                        if checked[UI.GameKey(info.clientProgram)] ~= false then return false end
+                    end
+                    return true
+                end
+                local function oracle(q)
+                    local pass, hidden = {}, 0
+                    for idx, e in ipairs(elements) do
+                        local hide = false
+                        if e.buttonType == T_BNET then
+                            local f = friends[e.id]
+                            hide = gameHides(f)
+                            if not hide and q ~= "" then
+                                local found = false
+                                for _, n in ipairs(friendNames(f)) do
+                                    if lower(n):find(lower(q), 1, true) then found = true end
+                                end
+                                hide = not found
+                            end
+                        elseif e.buttonType == T_WOW then
+                            hide = q ~= ""
+                        end
+                        pass[idx] = not hide
+                        if hide then hidden = hidden + 1 end
+                    end
+                    local out = {}
+                    if hidden == 0 then
+                        for _, e in ipairs(elements) do out[#out + 1] = e end
+                        return out
+                    end
+                    local kept = {}
+                    for idx, e in ipairs(elements) do
+                        if e.buttonType == T_DIVIDER or pass[idx] then kept[#kept + 1] = e end
+                    end
+                    for idx, e in ipairs(kept) do
+                        if e.buttonType ~= T_DIVIDER then
+                            out[#out + 1] = e
+                        else
+                            local before, after = false, false
+                            for b = 1, idx - 1 do if kept[b].buttonType ~= T_DIVIDER then before = true end end
+                            for a = idx + 1, #kept do if kept[a].buttonType ~= T_DIVIDER then after = true end end
+                            local prev = out[#out]
+                            if before and after and prev and prev.buttonType ~= T_DIVIDER then out[#out + 1] = e end
+                        end
+                    end
+                    return out
+                end
+                local function desc(list)
+                    local t = {}
+                    for k, e in ipairs(list) do t[k] = e.buttonType .. ":" .. tostring(e.id) end
+                    return table.concat(t, ",")
+                end
+                local function check(label, expected, provider)
+                    local got = provider:GetCollection()
+                    local same = #got == #expected
+                    if same then
+                        for k = 1, #got do if got[k] ~= expected[k] then same = false end end
+                    end
+                    assert(same, string.format("iteration %d: %s: query %s: got [%s], expected [%s]",
+                        i, label, show(query), desc(got), desc(expected)))
+                end
+
+                UI.SetNameText(query)
+                local provider = newProvider(elements)
+
+                -- Failing pass: the name read raises. Game decision only, no latch, no message.
+                failOn = pick({ "account", "num" })
+                Filter.run("classic", nil, provider)
+                assert(failOn == nil, "iteration " .. i .. ": injected failure was not reached")
+                check("failing pass", oracle(""), provider)
+                assert(not Filter.IsDisabled(), "iteration " .. i .. ": guard latched by a name error")
+                assert(printed == 0, "iteration " .. i .. ": announcement printed after a name error")
+
+                -- Next pass with working reads filters by name again.
+                Filter.run("classic", nil, provider)
+                check("recovery pass", oracle(trimmed), provider)
+                assert(not Filter.IsDisabled(), "iteration " .. i .. ": guard latched")
+                assert(printed == 0, "iteration " .. i .. ": announcement printed")
+            end
+        end)
+        restore()
+        if not ok2 then error(err2, 0) end
+    end)
+
+    for _, n in ipairs(globalNames) do _G[n] = savedGlobals[n] end
+    assert(ok, err)
+end)
+
+----------------------------------------------------------------------
+-- Feature: name-filter-input, Property 10: The name filter works while game filtering is disabled
+--
+-- Validates: Requirements 6.6
+----------------------------------------------------------------------
+property("Feature: name-filter-input, Property 10: The name filter works while game filtering is disabled", function()
+    local T_DIVIDER, T_WOW, T_BNET = 1, 2, 3
+    local globalNames = { "print", "C_BattleNet", "FRIENDS_BUTTON_TYPE_DIVIDER", "FRIENDS_BUTTON_TYPE_WOW",
+        "FRIENDS_BUTTON_TYPE_BNET", "issecretvalue" }
+    local savedGlobals = {}
+    for _, n in ipairs(globalNames) do savedGlobals[n] = _G[n] end
+
+    local namePool = { "Ann", "ann", "ANNA", "Bob#1234", "Zoë", "a.b", "a%b", "[x]", "Stormrage", "Area 52",
+        "Raiding Karazhan", "Élan", "x" }
+    local programs = { "WoW", "D3", "WTCG" }
+
+    local function genNameField()
+        local r = random(10)
+        if r <= 2 then return nil end
+        if r == 3 then return "" end
+        return pick(namePool)
+    end
+    local function genFriend()
+        local f = { games = {}, online = random() < 0.7 }
+        if f.online then
+            for g = 1, random(1, 2) do f.games[g] = { isOnline = true, clientProgram = pick(programs) } end
+        else
+            f.games[1] = { isOnline = false, clientProgram = pick(programs) }
+        end
+        for _, info in ipairs(f.games) do
+            info.characterName, info.realmName, info.richPresence = genNameField(), genNameField(), genNameField()
+        end
+        f.accountName, f.battleTag = genNameField(), genNameField()
+        return f
+    end
+    local function lower(s) return (s:gsub("[A-Z]", function(c) return string.char(c:byte() + 32) end)) end
+    local function friendNames(f)
+        local names = {}
+        local function add(v) if type(v) == "string" and v ~= "" then names[#names + 1] = v end end
+        add(f.accountName); add(f.battleTag)
+        for _, info in ipairs(f.games) do add(info.characterName); add(info.realmName); add(info.richPresence) end
+        return names
+    end
+
+    local ok, err = pcall(function()
+        FRIENDS_BUTTON_TYPE_DIVIDER, FRIENDS_BUTTON_TYPE_WOW, FRIENDS_BUTTON_TYPE_BNET = T_DIVIDER, T_WOW, T_BNET
+        issecretvalue = function() return false end
+        local printed = 0
+        print = function() printed = printed + 1 end
+
+        local friends
+        local failAccount = false   -- GetFriendAccountInfo raises, which fails the game decision
+        C_BattleNet = {
+            GetFriendAccountInfo = function(i)
+                if failAccount then error("injected game decision failure") end
+                local f = friends[i]
+                return { accountName = f.accountName, battleTag = f.battleTag, gameAccountInfo = f.games[1] }
+            end,
+            GetFriendNumGameAccounts = function(i) return #friends[i].games end,
+            GetFriendGameAccountInfo = function(i, j) return friends[i].games[j] end,
+        }
+
+        local function newProvider(list)
+            local p = { collection = {} }
+            for i, e in ipairs(list) do p.collection[i] = e end
+            function p:GetCollection() return self.collection end
+            function p:GetSize() return #self.collection end
+            function p:Flush() self.collection = {} end
+            function p:InsertTable(t) for _, e in ipairs(t) do self.collection[#self.collection + 1] = e end end
+            return p
+        end
+
+        for i = 1, ITERATIONS do
+            printed = 0
+            failAccount = false
+            -- A fresh Filter per iteration, because the guard latches for the session.
+            local Filter, ns, restore = loadFilter({})
+            local ok2, err2 = pcall(function()
+                local UI = ns.UI
+                friends = {}
+                for k = 1, random(1, 8) do friends[k] = genFriend() end
+                local checked = {}
+                for _, prog in ipairs(programs) do
+                    if random() < 0.6 then checked[UI.GameKey(prog)] = false end
+                end
+                if random() < 0.6 then checked[UI.OFFLINE_KEY] = false end
+                ns.db = { checkedGames = checked }
+
+                local elements = {}
+                for k = 1, #friends do elements[#elements + 1] = { buttonType = T_BNET, id = k } end
+                for k = 1, random(0, 3) do elements[#elements + 1] = { buttonType = T_WOW, id = 100 + k } end
+                for _ = 1, random(0, 3) do elements[#elements + 1] = { buttonType = T_DIVIDER, id = "d" } end
+                for k = #elements, 2, -1 do
+                    local j = random(k)
+                    elements[k], elements[j] = elements[j], elements[k]
+                end
+
+                -- Name decision only: the game decision is ignored while disabled.
+                local function oracle(q)
+                    local pass, hidden = {}, 0
+                    for idx, e in ipairs(elements) do
+                        local hide = false
+                        if e.buttonType == T_BNET and q ~= "" then
+                            local found = false
+                            for _, n in ipairs(friendNames(friends[e.id])) do
+                                if lower(n):find(lower(q), 1, true) then found = true end
+                            end
+                            hide = not found
+                        elseif e.buttonType == T_WOW then
+                            hide = q ~= ""
+                        end
+                        pass[idx] = not hide
+                        if hide then hidden = hidden + 1 end
+                    end
+                    local out = {}
+                    if hidden == 0 then
+                        for _, e in ipairs(elements) do out[#out + 1] = e end
+                        return out
+                    end
+                    local kept = {}
+                    for idx, e in ipairs(elements) do
+                        if e.buttonType == T_DIVIDER or pass[idx] then kept[#kept + 1] = e end
+                    end
+                    for idx, e in ipairs(kept) do
+                        if e.buttonType ~= T_DIVIDER then
+                            out[#out + 1] = e
+                        else
+                            local before, after = false, false
+                            for b = 1, idx - 1 do if kept[b].buttonType ~= T_DIVIDER then before = true end end
+                            for a = idx + 1, #kept do if kept[a].buttonType ~= T_DIVIDER then after = true end end
+                            local prev = out[#out]
+                            if before and after and prev and prev.buttonType ~= T_DIVIDER then out[#out + 1] = e end
+                        end
+                    end
+                    return out
+                end
+                local function desc(list)
+                    local t = {}
+                    for k, e in ipairs(list) do t[k] = e.buttonType .. ":" .. tostring(e.id) end
+                    return table.concat(t, ",")
+                end
+                local function check(label, query, expected, provider)
+                    local got = provider:GetCollection()
+                    local same = #got == #expected
+                    if same then
+                        for k = 1, #got do if got[k] ~= expected[k] then same = false end end
+                    end
+                    assert(same, string.format("iteration %d: %s: query %s: got [%s], expected [%s]",
+                        i, label, show(query), desc(got), desc(expected)))
+                end
+
+                -- Latch the guard with a game decision error (empty query, so only the game decision runs).
+                UI.SetNameText("")
+                local provider = newProvider(elements)
+                failAccount = true
+                Filter.run("classic", nil, provider)
+                failAccount = false
+                assert(Filter.IsDisabled(), "iteration " .. i .. ": guard did not latch")
+                assert(printed == 1, "iteration " .. i .. ": expected one announcement")
+
+                -- A non-empty query still filters by name.
+                local query
+                local names = friendNames(friends[random(#friends)])
+                if #names > 0 and random() < 0.7 then
+                    local n = pick(names)
+                    local a = random(#n)
+                    query = n:sub(a, random(a, #n))
+                else
+                    query = pick(namePool)
+                end
+                query = pick({ "", " " }) .. query .. pick({ "", "  " })
+                local trimmed = UI.NameQuery(query)
+                if trimmed == "" then query, trimmed = "x", "x" end
+                UI.SetNameText(query)
+                Filter.run("classic", nil, provider)
+                check("name query", query, oracle(trimmed), provider)
+
+                -- Reapply on a shown list goes through the same path.
+                -- Clearing the query restores the unfiltered list.
+                UI.SetNameText("")
+                Filter.run("classic", nil, provider)
+                check("cleared query", "", oracle(""), provider)
+
+                assert(Filter.IsDisabled(), "iteration " .. i .. ": guard cleared")
+                assert(printed == 1, "iteration " .. i .. ": announcement count changed to " .. printed)
+            end)
+            restore()
+            if not ok2 then error(err2, 0) end
+        end
+    end)
+
+    for _, n in ipairs(globalNames) do _G[n] = savedGlobals[n] end
+    assert(ok, err)
+end)
+
+----------------------------------------------------------------------
+-- Example tests for the name filter in Filter.lua (task 4.8)
+--
+-- Validates: Requirements 3.7, 4.4, 4.5, 5.6, 5.7, 6.4, 6.5, 6.6
+----------------------------------------------------------------------
+local function withNameFilterEnv(friends, extraEnv, fn)
+    local T_DIVIDER, T_WOW, T_BNET = 1, 2, 3
+    local globalNames = { "print", "C_BattleNet", "FRIENDS_BUTTON_TYPE_DIVIDER", "FRIENDS_BUTTON_TYPE_WOW",
+        "FRIENDS_BUTTON_TYPE_BNET", "issecretvalue" }
+    local savedGlobals = {}
+    for _, n in ipairs(globalNames) do savedGlobals[n] = _G[n] end
+    local ok, err = pcall(function()
+        FRIENDS_BUTTON_TYPE_DIVIDER, FRIENDS_BUTTON_TYPE_WOW, FRIENDS_BUTTON_TYPE_BNET = T_DIVIDER, T_WOW, T_BNET
+        issecretvalue = function() return false end
+        local env = { printed = 0, failNum = false, failAccount = false }
+        print = function() env.printed = env.printed + 1 end
+        C_BattleNet = {
+            GetFriendAccountInfo = function(i)
+                if env.failAccount then error("injected game decision failure") end
+                local f = friends[i]
+                return { accountName = f.accountName, battleTag = f.battleTag, gameAccountInfo = f.games[1] }
+            end,
+            GetFriendNumGameAccounts = function(i)
+                if env.failNum then
+                    env.failNum = false
+                    error("injected name read failure")
+                end
+                return #friends[i].games
+            end,
+            GetFriendGameAccountInfo = function(i, j) return friends[i].games[j] end,
+        }
+        function env.newProvider(list)
+            local p = { collection = {} }
+            for i, e in ipairs(list) do p.collection[i] = e end
+            function p:GetCollection() return self.collection end
+            function p:GetSize() return #self.collection end
+            function p:Flush() self.collection = {} end
+            function p:InsertTable(t) for _, e in ipairs(t) do self.collection[#self.collection + 1] = e end end
+            return p
+        end
+        function env.ids(p)
+            local out = {}
+            for i, e in ipairs(p:GetCollection()) do out[i] = (e.buttonType == T_DIVIDER) and "d" or tostring(e.id) end
+            return table.concat(out, ",")
+        end
+        env.T_DIVIDER, env.T_BNET = T_DIVIDER, T_BNET
+        local Filter, ns, restore = loadFilter(extraEnv or {})
+        local ok2, err2 = pcall(fn, Filter, ns, env)
+        restore()
+        if not ok2 then error(err2, 0) end
+    end)
+    for _, n in ipairs(globalNames) do _G[n] = savedGlobals[n] end
+    if not ok then error(err, 0) end
+end
+
+local function nameFriend(account, character, realm, presence)
+    return { accountName = account, battleTag = account .. "#1", online = true, games = {
+        { isOnline = true, clientProgram = "WoW", characterName = character, realmName = realm, richPresence = presence },
+    } }
+end
+
+property("Feature: name-filter-input, Example: realm-only and rich-presence-only matches keep the friend", function()
+    local friends = {
+        nameFriend("Alice", "Aa", "Stormrage", nil),
+        nameFriend("Bruno", "Bb", nil, "In Stormwind"),
+        nameFriend("Cleo", "Cc", "Area 52", "Raiding"),
+    }
+    withNameFilterEnv(friends, {}, function(Filter, ns, env)
+        ns.db = { checkedGames = {} }
+        local elements = {}
+        for k = 1, #friends do elements[k] = { buttonType = env.T_BNET, id = k } end
+        local p = env.newProvider(elements)
+        ns.UI.SetNameText("RAGE")
+        Filter.run("classic", nil, p)
+        assert(env.ids(p) == "1", "realm-only match: " .. env.ids(p))
+        ns.UI.SetNameText("in storm")
+        Filter.run("classic", nil, p)
+        assert(env.ids(p) == "2", "rich-presence-only match: " .. env.ids(p))
+    end)
+end)
+
+property("Feature: name-filter-input, Example: a SetDataProvider rebuild applies a non-empty query", function()
+    local friends = {
+        nameFriend("Alice", "Aa", "Stormrage", nil),
+        nameFriend("Bruno", "Bb", "Area 52", nil),
+    }
+    local hooks = {}
+    local scrollBox = setmetatable({}, { __index = function() return function() end end })
+    function scrollBox:SetDataProvider(p)
+        self.provider = p
+        for _, fn in ipairs(hooks) do fn(self, p) end
+    end
+    function scrollBox:GetDataProvider() return self.provider end
+    local extra = {
+        hooksecurefunc = function(_, _, fn) hooks[#hooks + 1] = fn end,
+        CreateFrame = function() return { RegisterEvent = function() end, SetScript = function() end } end,
+        FriendsListFrame = { ScrollBox = scrollBox, IsShown = function() return true end },
+    }
+    withNameFilterEnv(friends, extra, function(Filter, ns, env)
+        ns.db = { checkedGames = {} }
+        Filter.Install()
+        local function rebuilt()
+            local p = env.newProvider({ { buttonType = env.T_BNET, id = 1 }, { buttonType = env.T_BNET, id = 2 } })
+            scrollBox:SetDataProvider(p)
+            return env.ids(p)
+        end
+        assert(rebuilt() == "1,2", "empty query changed the rebuilt list")
+        ns.UI.SetNameText("rage")
+        assert(rebuilt() == "1", "first rebuild with query: " .. rebuilt())
+        assert(rebuilt() == "1", "second rebuild with query")
+        ns.UI.SetNameText("")
+        assert(rebuilt() == "1,2", "cleared query rebuild")
+    end)
+end)
+
+property("Feature: name-filter-input, Example: a divider emptied by the name filter is removed and returns", function()
+    local friends = {
+        nameFriend("Alice", "Aa", nil, nil),
+        nameFriend("Bruno", "Bb", nil, nil),
+        nameFriend("Cleo", "Cc", nil, nil),
+    }
+    withNameFilterEnv(friends, {}, function(Filter, ns, env)
+        ns.db = { checkedGames = {} }
+        local p = env.newProvider({
+            { buttonType = env.T_BNET, id = 1 }, { buttonType = env.T_DIVIDER, id = "d" },
+            { buttonType = env.T_BNET, id = 2 }, { buttonType = env.T_BNET, id = 3 },
+        })
+        ns.UI.SetNameText("alice")
+        Filter.run("classic", nil, p)
+        assert(env.ids(p) == "1", "divider should be removed: " .. env.ids(p))
+        ns.UI.SetNameText("")
+        Filter.run("classic", nil, p)
+        assert(env.ids(p) == "1,d,2,3", "divider should return: " .. env.ids(p))
+        ns.UI.SetNameText("cleo")
+        Filter.run("classic", nil, p)
+        assert(env.ids(p) == "3", "divider with no friend before it: " .. env.ids(p))
+        -- "#1" matches every BattleTag, so all friends and the divider are back.
+        ns.UI.SetNameText("#1")
+        Filter.run("classic", nil, p)
+        assert(env.ids(p) == "1,d,2,3", "all friends match: " .. env.ids(p))
+    end)
+end)
+
+property("Feature: name-filter-input, Example: a name read error pass is unfiltered, the next pass filters, no latch", function()
+    local friends = {
+        nameFriend("Alice", "Aa", nil, nil),
+        nameFriend("Bruno", "Bb", nil, nil),
+    }
+    withNameFilterEnv(friends, {}, function(Filter, ns, env)
+        ns.db = { checkedGames = {} }
+        local p = env.newProvider({ { buttonType = env.T_BNET, id = 1 }, { buttonType = env.T_BNET, id = 2 } })
+        ns.UI.SetNameText("alice")
+        env.failNum = true
+        Filter.run("classic", nil, p)
+        assert(env.ids(p) == "1,2", "failing pass should be unfiltered by name: " .. env.ids(p))
+        assert(not Filter.IsDisabled(), "guard latched by a name error")
+        assert(env.printed == 0, "message printed after a name error")
+        Filter.run("classic", nil, p)
+        assert(env.ids(p) == "1", "next pass should filter: " .. env.ids(p))
+        assert(not Filter.IsDisabled() and env.printed == 0, "guard latched or printed on the good pass")
+    end)
+end)
+
+property("Feature: name-filter-input, Example: a game decision error latches once and a later name query still filters", function()
+    local friends = {
+        nameFriend("Alice", "Aa", nil, nil),
+        nameFriend("Bruno", "Bb", nil, nil),
+    }
+    withNameFilterEnv(friends, {}, function(Filter, ns, env)
+        ns.db = { checkedGames = {} }
+        local p = env.newProvider({ { buttonType = env.T_BNET, id = 1 }, { buttonType = env.T_BNET, id = 2 } })
+        ns.UI.SetNameText("")
+        env.failAccount = true
+        Filter.run("classic", nil, p)
+        env.failAccount = false
+        assert(Filter.IsDisabled(), "guard did not latch")
+        assert(env.printed == 1, "expected one message, got " .. env.printed)
+        ns.UI.SetNameText("bruno")
+        Filter.run("classic", nil, p)
+        assert(env.ids(p) == "2", "name query after latch: " .. env.ids(p))
+        -- A later pass with a game error would not print again.
+        env.failAccount = true
+        Filter.run("classic", nil, p)
+        env.failAccount = false
+        assert(env.printed == 1, "message printed again: " .. env.printed)
+        ns.UI.SetNameText("")
+        Filter.run("classic", nil, p)
+        assert(env.ids(p) == "1,2", "cleared query after latch: " .. env.ids(p))
+    end)
+end)
+
+
+property("Follow-up: /ff debug is session-only and version falls back to dev", function()
+    local saved = { SlashCmdList = SlashCmdList, strtrim = strtrim, print = print,
+        GetAddOnMetadata = GetAddOnMetadata, C_AddOns = C_AddOns }
+    SlashCmdList = {}
+    strtrim = function(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
+    print = function() end
+    C_AddOns = nil
+    local function loadCore(version)
+        GetAddOnMetadata = function() return version end
+        local ns = {}
+        local chunk = assert(loadfile("ForeverFilter/Core.lua"))
+        chunk("ForeverFilter", ns)
+        return ns
+    end
+    local ok, err = pcall(function()
+        assert(loadCore("@project-version@").version == "dev", "token not replaced")
+        assert(loadCore(nil).version == "dev", "missing version not dev")
+        assert(loadCore("v1.2.3").version == "v1.2.3", "real version changed")
+
+        local ns = loadCore("v1")
+        ForeverFilterDB = { checkedGames = { WoW = true } }
+        ns.db = ForeverFilterDB
+        assert(not ns.debug, "debug not off at load")
+        local before = ns.db.checkedGames
+        SlashCmdList["FOREVERFILTER"]("debug")
+        assert(ns.debug == true, "debug not toggled on")
+        assert(ns.db.debug == nil, "debug saved to db")
+        local n = 0
+        for _ in pairs(ns.db) do n = n + 1 end
+        assert(n == 1 and ns.db.checkedGames == before, "db changed by debug toggle")
+        SlashCmdList["FOREVERFILTER"]("debug")
+        assert(not ns.debug, "debug not toggled off")
+    end)
+    SlashCmdList, strtrim, print = saved.SlashCmdList, saved.strtrim, saved.print
+    GetAddOnMetadata, C_AddOns = saved.GetAddOnMetadata, saved.C_AddOns
+    ForeverFilterDB = nil
     if not ok then error(err, 0) end
 end)
 
