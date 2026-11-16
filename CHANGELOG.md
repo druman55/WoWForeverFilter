@@ -1,5 +1,12 @@
 # Forever Filter
 
+## v1.0.1
+
+- **Name filter:** Type in the new Name box to show only friends whose account name, BattleTag, character, realm or rich presence matches. It works together with the game checkboxes.
+- **Icons:** The addon icon now appears on the filter window, on a button next to the Friends List close button (it also remembers whether the window opens with the Friends List), and on a minimap button. Use `/ff minimap` to show or hide the minimap button.
+- **Closes with the Friends List:** The filter window now closes when the Friends List closes.
+- **Debug:** `/ff debug` is now off at every login and is no longer saved.
+- **Documentation:** Release notes moved out of the README.
 ## v1.0.0
 
 First public release.
