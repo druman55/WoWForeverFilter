@@ -1,5 +1,9 @@
 # Forever Filter
 
+## v1.0.2
+
+- **Wago:** Releases are now also published to Wago Addons.
+
 ## v1.0.1
 
 - **Name filter:** Type in the new Name box to show only friends whose account name, BattleTag, character, realm or rich presence matches. It works together with the game checkboxes.
