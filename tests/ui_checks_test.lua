@@ -2149,22 +2149,47 @@ local function wiringEnv(winW, winH)
         CreateFrame = CreateFrame, UIParent = UIParent, C_Timer = C_Timer,
         UISpecialFrames = UISpecialFrames, print = print,
     }
-    local env = { log = {}, timers = {}, printed = {}, violations = {}, stubs = {} }
+    local env = { log = {}, timers = {}, printed = {}, violations = {}, stubs = {}, fontStrings = {} }
 
-    local absent = { TitleText = true, TitleContainer = true, InsetBg = true }
+    -- Text/text: so checkbox label code falls back to CreateFontString; CloseButton is set per test.
+    local absent = { TitleText = true, TitleContainer = true, InsetBg = true,
+                     Text = true, text = true, Low = true, High = true, CloseButton = true }
     local newFrame
+    local function runHooks(self, name)
+        local hs = rawget(self, "hooks")
+        local list = hs and hs[name]
+        if list then for _, fn in ipairs(list) do fn(self) end end
+    end
     local impl = {
         Show = function(self)
             self.shown = true
             local s = self.scripts.OnShow
             if s then s(self) end
+            runHooks(self, "OnShow")
         end,
         Hide = function(self)
             local was = self.shown
             self.shown = false
             local s = self.scripts.OnHide
             if was and s then s(self) end
+            if was then runHooks(self, "OnHide") end
         end,
+        HookScript = function(self, name, fn)
+            local hs = rawget(self, "hooks")
+            if not hs then hs = {}; rawset(self, "hooks", hs) end
+            hs[name] = hs[name] or {}
+            table.insert(hs[name], fn)
+        end,
+        SetValue = function(self, v)
+            rawset(self, "value", v)
+            local s = self.scripts.OnValueChanged
+            if s then s(self, v) end
+        end,
+        GetValue = function(self) return rawget(self, "value") end,
+        SetChecked = function(self, v) rawset(self, "checked", v and true or false) end,
+        GetChecked = function(self) return rawget(self, "checked") or false end,
+        SetText = function(self, v) rawset(self, "text", v) end,
+        GetText = function(self) return rawget(self, "text") end,
         IsShown = function(self) return self.shown end,
         SetScript = function(self, name, fn) self.scripts[name] = fn end,
         SetPoint = function(self, ...)
@@ -2183,7 +2208,12 @@ local function wiringEnv(winW, winH)
         GetEffectiveScale = function() return 1 end,
         SetScale = function(self, v) rawset(self, "scale", v) end,
         GetScale = function(self) return rawget(self, "scale") or 1 end,
-        CreateFontString = function() return newFrame() end,
+        CreateFontString = function(self)
+            local fs = newFrame()
+            rawset(fs, "owner", self)
+            env.fontStrings[#env.fontStrings + 1] = fs
+            return fs
+        end,
         CreateTexture = function() return newFrame() end,
     }
     newFrame = function(name)
@@ -2737,6 +2767,580 @@ property("Feature: options-panel, Property 6: Header text with and without the c
         assert(without == label .. debugId, "false result wrong " .. ctx .. " got " .. show(without))
         assert(withCount:sub(1, #without) == without, "false result is not a prefix of true result " .. ctx)
     end
+end)
+
+----------------------------------------------------------------------
+-- Feature: options-panel, Property 7: Layout without the strip is unchanged
+-- Validates: Requirements 2.6, 2.9, 8.2, 8.4
+----------------------------------------------------------------------
+property("Feature: options-panel, Property 7: Layout without the strip is unchanged", function()
+    local UI = loadUI({})
+
+    for i = 1, ITERATIONS do
+        local rowArea = pick({ 0, 5000, random(0, 5000), random() * 5000 })
+        local screenH = pick({ 480, 4320, random(480, 4320), 480 + random() * 3840 })
+        local screenW = pick({ 480, 4320, random(480, 4320), 480 + random() * 3840 })
+        local widths = {}
+        for j = 1, random(0, 20) do widths[j] = random() * 1500 end
+        local isEmpty = random() < 0.5
+        local ctx = string.format("(rowArea=%s, screenH=%s, screenW=%s, #widths=%d, isEmpty=%s)",
+            show(rowArea), show(screenH), show(screenW), #widths, tostring(isEmpty))
+
+        local oldH = UI.ComputeWindowHeight(rowArea, screenH, isEmpty)
+        local oldW = UI.ComputeWindowWidth(widths, screenW, isEmpty)
+
+        for _, zero in ipairs({ 0, false }) do
+            local v = zero or nil
+            local h = UI.ComputeWindowHeightWithStrip(rowArea, screenH, isEmpty, v)
+            local w = UI.ComputeWindowWidthWithStrip(widths, screenW, isEmpty, v)
+            assert(h == oldH, "height with stripHeight " .. show(v) .. " differs: " .. show(h) .. " ~= " .. show(oldH) .. " " .. ctx)
+            assert(w == oldW, "width with stripMinWidth " .. show(v) .. " differs: " .. show(w) .. " ~= " .. show(oldW) .. " " .. ctx)
+        end
+        assert(UI.ComputeWindowHeightWithStrip(rowArea, screenH, isEmpty) == oldH, "missing stripHeight differs " .. ctx)
+        assert(UI.ComputeWindowWidthWithStrip(widths, screenW, isEmpty) == oldW, "missing stripMinWidth differs " .. ctx)
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: options-panel, Property 8: Layout with the strip
+-- Validates: Requirements 2.3, 2.6, 2.7
+----------------------------------------------------------------------
+property("Feature: options-panel, Property 8: Layout with the strip", function()
+    local UI = loadUI({})
+
+    for i = 1, ITERATIONS do
+        local rowArea = pick({ 0, 5000, random(0, 5000), random() * 5000 })
+        local screenH = pick({ 480, 4320, random(480, 4320), 480 + random() * 3840 })
+        local screenW = pick({ 480, 4320, random(480, 4320), 480 + random() * 3840 })
+        local widths = {}
+        for j = 1, random(0, 20) do widths[j] = random() * 1500 end
+        local isEmpty = random() < 0.5
+        -- Scales on the grid (0.50 to 1.50) and off it.
+        local scale = pick({ 0.5, 1.5, 0.5 + random(0, 20) * 0.05, 0.5 + random() })
+        local h = UI.StripHeight(scale)
+        local minW = UI.StripMinWidth(scale)
+        local ctx = string.format("(rowArea=%s, screenH=%s, screenW=%s, #widths=%d, isEmpty=%s, scale=%s)",
+            show(rowArea), show(screenH), show(screenW), #widths, tostring(isEmpty), show(scale))
+
+        local oldH = UI.ComputeWindowHeight(rowArea, screenH, isEmpty)
+        local oldW = UI.ComputeWindowWidth(widths, screenW, isEmpty)
+        local newH = UI.ComputeWindowHeightWithStrip(rowArea, screenH, isEmpty, h)
+        local newW = UI.ComputeWindowWidthWithStrip(widths, screenW, isEmpty, minW)
+        local maxH = math.max(120, math.floor(0.8 * screenH))
+
+        assert(newH >= oldH, "height below old height: " .. show(newH) .. " < " .. show(oldH) .. " " .. ctx)
+        assert(newH <= maxH, "height above cap: " .. show(newH) .. " > " .. show(maxH) .. " " .. ctx)
+        if not isEmpty then
+            local want = 66 + rowArea + h
+            if want <= maxH then
+                local expected = math.max(120, want)
+                assert(math.abs(newH - expected) < 1e-9,
+                    "height not 66 + rowArea + h: " .. show(newH) .. " ~= " .. show(expected) .. " " .. ctx)
+            end
+        end
+        assert(newW >= oldW, "width below old width: " .. show(newW) .. " < " .. show(oldW) .. " " .. ctx)
+        assert(newW >= minW, "width below StripMinWidth: " .. show(newW) .. " < " .. show(minW) .. " " .. ctx)
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: options-panel, Property 9: Strip dimensions keep the slider on screen
+-- Validates: Requirements 2.8, 2.9, 3.11
+----------------------------------------------------------------------
+property("Feature: options-panel, Property 9: Strip dimensions keep the slider on screen", function()
+    local UI = loadUI({})
+    local nan = 0 / 0
+    local inf = math.huge
+    local function finitePositive(x)
+        return type(x) == "number" and x == x and x > 0 and x < inf
+    end
+    local function genScale()
+        return pick({ 0.5, 1.5, 0.5 + random(0, 20) * 0.05, 0.5 + random() })
+    end
+    local defH = UI.StripHeight(UI.DEFAULT_SCALE)
+    local defW = UI.StripMinWidth(UI.DEFAULT_SCALE)
+
+    for i = 1, ITERATIONS do
+        local a, b = genScale(), genScale()
+        if a > b then a, b = b, a end
+        local ctx = string.format("(a=%s, b=%s)", show(a), show(b))
+        local ha, hb = UI.StripHeight(a), UI.StripHeight(b)
+        local wa, wb = UI.StripMinWidth(a), UI.StripMinWidth(b)
+
+        assert(finitePositive(ha) and finitePositive(hb), "StripHeight not positive finite " .. ctx)
+        assert(finitePositive(wa) and finitePositive(wb), "StripMinWidth not positive finite " .. ctx)
+        assert(hb <= ha, "StripHeight increased with scale: " .. show(hb) .. " > " .. show(ha) .. " " .. ctx)
+        assert(wa * a >= 140 + 2 * 18 - 1e-9, "StripMinWidth * scale below 176 at a " .. ctx)
+        assert(wb * b >= 140 + 2 * 18 - 1e-9, "StripMinWidth * scale below 176 at b " .. ctx)
+
+        local bad = pick({
+            nil, nan, inf, -inf, 0, -1, "1", true, {},
+            0.5 - random() * 0.49, 1.5 + 1e-6 + random() * 100, -random() * 100,
+        })
+        local ctxBad = "(value=" .. show(bad) .. ")"
+        assert(UI.StripHeight(bad) == defH, "StripHeight out of range differs from default " .. ctxBad)
+        assert(UI.StripMinWidth(bad) == defW, "StripMinWidth out of range differs from default " .. ctxBad)
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: options-panel, Property 10: Reset to defaults
+-- Validates: Requirements 5.9, 7.2, 7.3, 7.4, 7.6
+----------------------------------------------------------------------
+property("Feature: options-panel, Property 10: Reset to defaults", function()
+    local UI = loadUI({})
+    local nan = 0 / 0
+
+    local function deepEqual(a, b)
+        if type(a) ~= type(b) then return false end
+        if type(a) ~= "table" then return a == b or (a ~= a and b ~= b) end
+        for k, v in pairs(a) do
+            if not deepEqual(v, b[k]) then return false end
+        end
+        for k in pairs(b) do
+            if a[k] == nil then return false end
+        end
+        return true
+    end
+
+    local function deepCopy(v)
+        if type(v) ~= "table" then return v end
+        local c = {}
+        for k, x in pairs(v) do c[k] = deepCopy(x) end
+        return c
+    end
+
+    local function genAny()
+        local r = random(8)
+        if r == 1 then return random(-5, 5) end
+        if r == 2 then return random() * 100 end
+        if r == 3 then return pick({ "true", "false", "", "abc" }) end
+        if r == 4 then return {} end
+        if r == 5 then return nan end
+        if r == 6 then return pick({ math.huge, -math.huge }) end
+        if r == 7 then return random() < 0.5 end
+        return nil
+    end
+
+    local function genDb()
+        local db = {}
+        db.window = { point = "TOPLEFT", left = random(0, 2000), top = random(0, 2000) }
+        db.checkedGames = { [random(1, 50)] = true, ["g" .. random(1, 9)] = false }
+        if random() < 0.8 then
+            db.windowScale = pick({ 0.5, 0.85, 1.2, 1.5, 99, -1, "bad", nan, math.huge, {}, true, 0.5 + random() })
+        end
+        if random() < 0.8 then
+            db.showPlayerCounts = random() < 0.5 and (random() < 0.5) or genAny()
+        end
+        if random() < 0.5 then db.debug = random() < 0.5 end
+        for _ = 1, random(0, 4) do db["extra" .. random(1, 20)] = pick({ 1, "x", true, {} }) end
+        return db
+    end
+
+    for i = 1, ITERATIONS do
+        local db = genDb()
+        local ctx = "(scale=" .. show(db.windowScale) .. ", counts=" .. show(db.showPlayerCounts) .. ")"
+        local expected = deepCopy(db)
+        expected.windowScale = nil
+        expected.showPlayerCounts = nil
+
+        UI.ResetOptions(db)
+        assert(UI.ReadScale(db) == UI.DEFAULT_SCALE, "ReadScale not default after reset " .. ctx)
+        assert(UI.ReadShowCounts(db) == true, "ReadShowCounts not true after reset " .. ctx)
+        assert(db.windowScale == nil and db.showPlayerCounts == nil, "settings not removed " .. ctx)
+        assert(deepEqual(expected, db), "fields other than the two settings changed " .. ctx)
+
+        -- A second call leaves the db unchanged.
+        UI.ResetOptions(db)
+        assert(deepEqual(expected, db), "second ResetOptions changed the db " .. ctx)
+
+        -- A non-table db is ignored without error.
+        local junk = genAny()
+        UI.ResetOptions(junk)
+        UI.ResetOptions(nil)
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: options-panel, Task 1.14: Example tests for the pure layer
+-- Validates: Requirements 3.1, 3.3, 6.1, 6.6, 6.7, 6.8, 8.4, 9.2, 9.4
+----------------------------------------------------------------------
+property("Feature: options-panel, Task 1.14: Example tests for the pure layer", function()
+    local UI = loadUI({})
+
+    local function deepEqual(a, b)
+        if type(a) ~= type(b) then return false end
+        if type(a) ~= "table" then return a == b or (a ~= a and b ~= b) end
+        for k, v in pairs(a) do
+            if not deepEqual(v, b[k]) then return false end
+        end
+        for k in pairs(b) do
+            if a[k] == nil then return false end
+        end
+        return true
+    end
+
+    -- Constants.
+    assert(UI.SCALE_STEP == 0.05, "SCALE_STEP ~= 0.05")
+    assert(UI.DEFAULT_SHOW_COUNTS == true, "DEFAULT_SHOW_COUNTS ~= true")
+
+    -- The 21 grid values are valid, and 0.85 is among them.
+    local hasDefault = false
+    for n = 0, 20 do
+        local v = math.floor((0.5 + n * 0.05) * 100 + 0.5) / 100
+        assert(UI.IsValidScale(v), "grid value not valid: " .. v)
+        if v == 0.85 then hasDefault = true end
+    end
+    assert(hasDefault, "0.85 not on the grid")
+
+    assert(UI.SnapScale(0.73) == 0.75, "SnapScale(0.73) ~= 0.75")
+
+    -- HeaderText at the default setting equals the pre-change string.
+    local row = { game = "D3", count = 3 }
+    local expected = "D3 (3)"
+    local UInil, nsNil = loadUI(nil)
+    assert(nsNil.db == nil)
+    assert(UInil.HeaderText(row) == expected, "HeaderText with ns.db nil: " .. show((UInil.HeaderText(row))))
+    local UIempty = loadUI({})
+    assert(UIempty.HeaderText(row) == expected, "HeaderText with empty db: " .. show((UIempty.HeaderText(row))))
+
+    -- Counts off with debug on: the id text stays, the count goes.
+    local UIoff = loadUI({ showPlayerCounts = false, debug = true })
+    local wowRow = { game = "WoW", wowProjectID = 11, count = 3 }
+    local text = UIoff.HeaderText(wowRow)
+    assert(text == "WoW [id: 11]", "counts off + debug: " .. show(text))
+    assert(not text:find("%(3%)"), "count still present")
+    local noneText = UIoff.HeaderText({ game = "WoW", count = 3 })
+    assert(noneText == "WoW [id: none]", "counts off + debug, no id: " .. show(noneText))
+
+    -- GroupByGame output does not depend on the count setting.
+    local Friends, nsF = loadFriends()
+    local Games = loadGames(nsF)
+    local entries = {
+        { name = "Ann", isOnline = true, game = "WoW", wowProjectID = 1, subIcon = "WoW_Retail" },
+        { name = "Bob", isOnline = true, game = "WoW", wowProjectID = 11 },
+        { name = "Cy", isOnline = true, game = "D3" },
+        { name = "Di", isOnline = false, game = "WTCG" },
+    }
+    nsF.db = nil
+    local without = Friends.GroupByGame(entries, Games.GetGameName)
+    nsF.db = { showPlayerCounts = false }
+    local withOff = Friends.GroupByGame(entries, Games.GetGameName)
+    nsF.db = { showPlayerCounts = true }
+    local withOn = Friends.GroupByGame(entries, Games.GetGameName)
+    assert(deepEqual(without, withOff), "GroupByGame changed with counts off")
+    assert(deepEqual(without, withOn), "GroupByGame changed with counts on")
+
+    -- UI.lua loads with showPlayerCounts undefined and creates no window frames at load time.
+    local created = {}
+    local savedCreateFrame = CreateFrame
+    CreateFrame = function(kind, name, ...)
+        created[#created + 1] = { kind = kind, name = name }
+        return stubFrame()
+    end
+    local ok, err = pcall(loadUI, {})
+    CreateFrame = savedCreateFrame
+    assert(ok, "UI.lua failed to load: " .. tostring(err))
+    for _, c in ipairs(created) do
+        assert(c.name ~= "ForeverFilterFrame", "window frame created at load")
+        assert(c.kind == "Frame", "non-event frame created at load: " .. tostring(c.kind))
+    end
+end)
+
+----------------------------------------------------------------------
+-- Feature: options-panel, Example tests for the frame wiring
+-- Validates: Requirements 1.1, 1.2, 1.4, 1.5, 1.6, 1.7, 2.3, 2.4, 2.5, 2.10, 2.11, 2.12, 3.2, 3.10,
+--            3.11, 4.2, 4.3, 4.5, 4.6, 5.6, 5.7, 5.8, 5.9, 6.3, 7.1, 7.2, 7.3, 7.4, 7.5, 8.5
+----------------------------------------------------------------------
+local function optDeepEqual(a, b)
+    if type(a) ~= type(b) then return false end
+    if type(a) ~= "table" then return a == b end
+    for k, v in pairs(a) do if not optDeepEqual(v, b[k]) then return false end end
+    for k in pairs(b) do if a[k] == nil then return false end end
+    return true
+end
+
+local function optDeepCopy(v)
+    if type(v) ~= "table" then return v end
+    local c = {}
+    for k, x in pairs(v) do c[k] = optDeepCopy(x) end
+    return c
+end
+
+-- Runs fn(env, ctx) with the wiring harness plus a recording CreateFrame and a GameTooltip stub.
+local function withOptions(fn, opts)
+    opts = opts or {}
+    withWiring(300, 400, function(env)
+        local savedTooltip = GameTooltip
+        local ctx = { created = {}, tips = {}, refreshes = 0 }
+        local base = CreateFrame
+        CreateFrame = function(kind, name, parent, template)
+            if kind == "Slider" and opts.failSlider then error("no slider template") end
+            local f = base(kind, name, parent, template)
+            f.kind, f.template, f.parentFrame = kind, template, parent
+            ctx.created[#ctx.created + 1] = f
+            if name == "ForeverFilterFrame" then
+                rawset(f, "CloseButton", base("Button", "close"))
+            end
+            return f
+        end
+        GameTooltip = {
+            SetOwner = function() end,
+            SetText = function(_, t) ctx.tips[#ctx.tips + 1] = t end,
+            Show = function() end,
+            Hide = function() end,
+        }
+        function ctx.find(kind, parent, template)
+            for _, f in ipairs(ctx.created) do
+                if f.kind == kind and (parent == nil or f.parentFrame == parent)
+                    and (template == nil or f.template == template) then
+                    return f
+                end
+            end
+        end
+        function ctx.refreshCount()
+            local n = 0
+            for _, e in ipairs(env.log) do if e[1] == "Refresh" then n = n + 1 end end
+            return n
+        end
+        function ctx.parts()
+            local win = env.win
+            local strip = ctx.find("Frame", win)
+            local p = { strip = strip, slider = ctx.find("Slider"),
+                        check = ctx.find("CheckButton", strip), reset = ctx.find("Button", strip) }
+            for _, fs in ipairs(env.fontStrings) do
+                if rawget(fs, "owner") == p.slider and fs.text ~= "Scale" then p.valueText = fs end
+                if rawget(fs, "owner") == p.check then p.checkText = fs end
+            end
+            return p
+        end
+        local ok, err = pcall(fn, env, ctx)
+        CreateFrame, GameTooltip = base, savedTooltip
+        assert(ok, err)
+    end)
+end
+
+property("Feature: options-panel, Example tests: gear button, tooltip, toggle and lazy strip", function()
+    withOptions(function(env, ctx)
+        env.UI.Show()
+        local win = env.win
+        local gear = ctx.find("Button", win)
+        assert(gear, "gear button not created as a child of the window")
+        local anchored = false
+        for _, c in ipairs(gear.calls) do
+            if c[1] == "SetPoint" and c[2] == "RIGHT" and c[3] == win.CloseButton and c[4] == "LEFT" then
+                anchored = true
+            end
+        end
+        assert(anchored, "gear not anchored RIGHT to CloseButton LEFT")
+        for _, c in ipairs(win.CloseButton.calls) do
+            assert(c[1] ~= "SetPoint" and c[1] ~= "ClearAllPoints", "CloseButton was repositioned")
+        end
+
+        gear.scripts.OnEnter(gear)
+        assert(ctx.tips[#ctx.tips] == "Options", "tooltip text is " .. tostring(ctx.tips[#ctx.tips]))
+
+        assert(ctx.find("Slider") == nil and ctx.find("Frame", win) == nil, "strip created before first click")
+
+        local r0 = ctx.refreshCount()
+        gear.scripts.OnClick(gear)
+        local strip = ctx.find("Frame", win)
+        assert(strip and strip.shown, "first click did not show the strip")
+        assert(ctx.refreshCount() == r0 + 1, "first click did not refresh")
+        gear.scripts.OnClick(gear)
+        assert(not strip.shown, "second click did not hide the strip")
+        assert(ctx.refreshCount() == r0 + 2, "second click did not refresh")
+    end)
+end)
+
+property("Feature: options-panel, Example tests: missing slider template leaves the window working", function()
+    withOptions(function(env, ctx)
+        env.UI.Show()
+        local win = env.win
+        local gear = ctx.find("Button", win)
+        local ok, err = pcall(gear.scripts.OnClick, gear)
+        assert(ok, "click raised: " .. tostring(err))
+        ok, err = pcall(gear.scripts.OnClick, gear)
+        assert(ok, "second click raised: " .. tostring(err))
+        assert(win.shown, "window no longer shown")
+        local strip = ctx.find("Frame", win)
+        assert(strip == nil or not strip.shown, "strip left shown after failed creation")
+        assert(#env.printed == 0, "printed: " .. tostring(env.printed[1]))
+        assert(pcall(env.UI.Refresh), "Refresh failed after a failed strip creation")
+    end, { failSlider = true })
+end)
+
+property("Feature: options-panel, Example tests: window hide and show close the strip", function()
+    withOptions(function(env, ctx)
+        env.UI.Show()
+        local win = env.win
+        local gear = ctx.find("Button", win)
+        gear.scripts.OnClick(gear)
+        local strip = ctx.find("Frame", win)
+        assert(strip.shown)
+        win:Hide()
+        assert(not strip.shown, "strip still shown after the window hid")
+        win:Show()
+        assert(not strip.shown, "strip shown after the window re-opened")
+        gear.scripts.OnClick(gear)
+        assert(strip.shown, "state was not reset: click did not open the strip")
+    end)
+end)
+
+property("Feature: options-panel, Example tests: opening and closing keeps window settings and TOPLEFT", function()
+    withOptions(function(env, ctx)
+        env.UI.WriteWindowSettings(env.ns.db, 321, 654)
+        local before = optDeepCopy(env.ns.db.window)
+        env.UI.Show()
+        local win = env.win
+        win.left, win.top = 321, 654
+        local gear = ctx.find("Button", win)
+        for i = 1, 2 do
+            gear.scripts.OnClick(gear)
+            local pts = env.points()
+            local p = pts[#pts]
+            assert(p[2] == "TOPLEFT" and p[3] == UIParent and p[4] == "BOTTOMLEFT" and p[5] == 321 and p[6] == 654,
+                "TOPLEFT moved on toggle " .. i)
+            assert(optDeepEqual(env.ns.db.window, before), "window settings changed on toggle " .. i)
+        end
+    end)
+end)
+
+property("Feature: options-panel, Example tests: slider writes snapped value and applies scale", function()
+    withOptions(function(env, ctx)
+        env.UI.Show()
+        local win = env.win
+        local gear = ctx.find("Button", win)
+        gear.scripts.OnClick(gear)
+        local p = ctx.parts()
+        local mn, mx, step
+        for _, c in ipairs(p.slider.calls) do
+            if c[1] == "SetMinMaxValues" then mn, mx = c[2], c[3] end
+            if c[1] == "SetValueStep" then step = c[2] end
+        end
+        assert(mn == 0.5 and mx == 1.5 and step == 0.05, "slider range/step wrong")
+
+        local windowBefore = optDeepCopy(env.ns.db.window)
+        p.slider.scripts.OnValueChanged(p.slider, 0.73)
+        assert(env.ns.db.windowScale == 0.75, "wrote " .. tostring(env.ns.db.windowScale))
+        local sawScale = false
+        for _, c in ipairs(win.calls) do
+            if c[1] == "SetScale" and c[2] == 0.75 then sawScale = true end
+        end
+        assert(sawScale and win.scale == 0.75, "SetScale(0.75) not applied")
+        assert(optDeepEqual(env.ns.db.window, windowBefore), "window settings changed")
+        assert(p.valueText and p.valueText.text == "0.75", "value text is " .. tostring(p.valueText and p.valueText.text))
+    end)
+end)
+
+property("Feature: options-panel, Example tests: syncing does not write or apply, /ff scale updates slider", function()
+    withOptions(function(env, ctx)
+        env.ns.db.windowScale = nil
+        env.UI.Show()
+        local win = env.win
+        local function scaleCalls()
+            local n = 0
+            for _, c in ipairs(win.calls) do if c[1] == "SetScale" then n = n + 1 end end
+            return n
+        end
+        local gear = ctx.find("Button", win)
+        local n0 = scaleCalls()
+        gear.scripts.OnClick(gear)
+        local p = ctx.parts()
+        assert(p.slider.value == 0.85, "slider not synced to default on open: " .. tostring(p.slider.value))
+        assert(rawget(env.ns.db, "windowScale") == nil, "sync wrote the scale setting")
+        assert(scaleCalls() == n0, "sync called ApplyScale")
+        assert(p.check.checked == true, "checkbox not synced to default")
+
+        env.UI.HandleScaleCommand("0.7")
+        assert(p.slider.value == 0.7, "slider not updated by /ff scale: " .. tostring(p.slider.value))
+        assert(p.valueText.text == "0.7", "value text is " .. tostring(p.valueText.text))
+        assert(env.ns.db.windowScale == 0.7)
+    end)
+end)
+
+property("Feature: options-panel, Example tests: dragging skips PlaceWindow until mouse up", function()
+    withOptions(function(env, ctx)
+        env.UI.Show()
+        local win = env.win
+        local placed = 0
+        local orig = env.UI.PlaceWindow
+        env.UI.PlaceWindow = function(...) placed = placed + 1; return orig(...) end
+        local gear = ctx.find("Button", win)
+        gear.scripts.OnClick(gear)
+        local p = ctx.parts()
+
+        p.slider.scripts.OnValueChanged(p.slider, 1.2)
+        assert(placed == 1, "non-drag change placed " .. placed .. " times")
+
+        p.slider.scripts.OnMouseDown(p.slider)
+        p.slider.scripts.OnValueChanged(p.slider, 1.3)
+        p.slider.scripts.OnValueChanged(p.slider, 1.4)
+        assert(placed == 1, "PlaceWindow ran while dragging")
+        p.slider.scripts.OnMouseUp(p.slider)
+        assert(placed == 2, "mouse up placed " .. (placed - 1) .. " times")
+    end)
+end)
+
+property("Feature: options-panel, Example tests: slider is counter-scaled at each window scale", function()
+    withOptions(function(env, ctx)
+        env.UI.Show()
+        local win = env.win
+        local gear = ctx.find("Button", win)
+        gear.scripts.OnClick(gear)
+        local p = ctx.parts()
+        for _, s in ipairs({ 0.5, 0.85, 1.5 }) do
+            env.UI.HandleScaleCommand(tostring(s))
+            assert(math.abs(win.scale - s) < 1e-9, "window scale " .. tostring(win.scale))
+            assert(math.abs(p.slider.scale - 1 / s) < 1e-9, "slider scale " .. tostring(p.slider.scale) .. " at " .. s)
+        end
+    end)
+end)
+
+property("Feature: options-panel, Example tests: checkbox, reset button, labels and /ff reset", function()
+    withOptions(function(env, ctx)
+        local db = env.ns.db
+        db.checkedGames = { WoW = true }
+        db.windowScale = 1.2
+        env.UI.WriteWindowSettings(db, 11, 22)
+        env.UI.Show()
+        local win = env.win
+        local gear = ctx.find("Button", win)
+        gear.scripts.OnClick(gear)
+        local p = ctx.parts()
+
+        -- Opening sets controls from the db; labels are set.
+        assert(p.slider.value == 1.2, "slider not set from db")
+        assert(p.check.checked == true, "checkbox not set from db")
+        assert(p.checkText and p.checkText.text == "Show player counts", "checkbox label")
+        assert(p.reset and p.reset.text == "Reset to defaults", "reset label")
+
+        local games = optDeepCopy(db.checkedGames)
+        local windowBefore = optDeepCopy(db.window)
+
+        local r0 = ctx.refreshCount()
+        p.check.checked = false
+        p.check.scripts.OnClick(p.check)
+        assert(db.showPlayerCounts == false, "count setting not written")
+        assert(optDeepEqual(db.checkedGames, games), "checkedGames changed")
+        assert(ctx.refreshCount() == r0 + 1, "checkbox did not refresh")
+
+        -- /ff reset leaves both settings unchanged.
+        env.UI.ResetPosition()
+        assert(db.showPlayerCounts == false and db.windowScale == 1.2, "ResetPosition changed the options")
+
+        -- Reset to defaults.
+        windowBefore = optDeepCopy(db.window)
+        r0 = ctx.refreshCount()
+        p.reset.scripts.OnClick(p.reset)
+        assert(rawget(db, "windowScale") == nil and rawget(db, "showPlayerCounts") == nil, "settings not removed")
+        assert(win.scale == 0.85, "window scale " .. tostring(win.scale))
+        assert(p.slider.value == 0.85, "slider not reset")
+        assert(p.check.checked == true, "checkbox not reset")
+        assert(optDeepEqual(db.window, windowBefore), "reset changed window settings")
+        assert(optDeepEqual(db.checkedGames, games), "reset changed checkedGames")
+        assert(ctx.refreshCount() > r0, "reset did not refresh")
+    end)
 end)
 
 ----------------------------------------------------------------------
