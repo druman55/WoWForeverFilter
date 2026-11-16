@@ -1,4 +1,4 @@
-﻿# Releasing Forever Filter
+# Releasing Forever Filter
 
 A GitHub Actions workflow builds the addon zip and uploads it to GitHub, CurseForge and Wago when you push a version tag. Do these steps once, in order, before the first release.
 
@@ -41,7 +41,7 @@ The workflow in `.github/workflows/release.yml` builds the zip and uploads it.
 ## Project details
 
 - CurseForge project ID: 1810309 (already set in `ForeverFilter.toc`).
-- Wago project ID: not set yet. Replace `REPLACE_WITH_WAGO_PROJECT_ID` in `ForeverFilter.toc` and add the `WAGO_API_TOKEN` secret.
+- Wago project ID: nKWwMoKE (set in `ForeverFilter.toc`). The `WAGO_API_TOKEN` GitHub secret is set.
 - Store text for the project pages is in `description.md`. The logo is `resources/icon/PNG/ForeverFilter_256.png`. Both are uploaded by hand on each site.
 - `deploy.cmd` copies the addon into a local WoW install and fills in the version from `CHANGELOG.md`.
 

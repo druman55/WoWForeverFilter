@@ -7,8 +7,7 @@
 ## IconTexture: Interface\AddOns\ForeverFilter\Textures\ForeverFilter_64
 ## SavedVariables: ForeverFilterDB
 ## X-Curse-Project-ID: 1810309
-# TODO(release): replace the value below with the Wago project ID (developer dashboard).
-## X-Wago-ID: REPLACE_WITH_WAGO_PROJECT_ID
+## X-Wago-ID: nKWwMoKE
 
 Core.lua
 Friends.lua
