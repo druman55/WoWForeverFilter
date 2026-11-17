@@ -13,9 +13,8 @@ local HEADER_FONT_SIZE = 14
 local MIN_WINDOW_HEIGHT = 120
 local MAX_HEIGHT_FRACTION = 0.8
 local CHROME_HEIGHT = 66
-local NAME_ROW_HEIGHT = 28    -- label and edit box row, window units
-local HEADING_HEIGHT = 20     -- "Game Filter" line, window units
-local TOP_AREA_HEIGHT = NAME_ROW_HEIGHT + HEADING_HEIGHT
+local NAME_FRAME_HEIGHT = 30  -- name filter window height
+local NAME_FRAME_GAP = 2      -- gap between the name window and what it sits above
 local NAME_MAX_LETTERS = 64
 local OFFLINE_DIVIDER_HEIGHT = 1 + ROW_GAP  -- divider line plus the gap below it
 local ICON_RETRIES = 3
@@ -102,11 +101,12 @@ end
 
 UI.SCALE_STEP = 0.05
 UI.DEFAULT_SHOW_COUNTS = true
+UI.DEFAULT_ALWAYS_SHOW_NAME_FILTER = true
 
 local SLIDER_SCREEN_WIDTH = 140   -- on-screen width of the slider
 local SLIDER_MARGIN       = 18    -- on-screen left and right margin of the slider
 local SLIDER_SLOT         = 36    -- on-screen height of the label and slider rows
-local STRIP_ROWS_HEIGHT   = 60    -- window units: checkbox row, reset row, padding
+local STRIP_ROWS_HEIGHT   = 86    -- window units: two checkbox rows, reset row, padding
 local STRIP_MIN_CONTENT   = 250   -- window units: checkbox row and reset button width
 
 -- Pure: nearest multiple of SCALE_STEP within MIN_SCALE..MAX_SCALE, rounded to 2 decimals.
@@ -586,11 +586,33 @@ function UI.ResetShowCounts(db)
     db.showPlayerCounts = nil
 end
 
--- Removes windowScale and showPlayerCounts only.
+-- Pure read: the boolean in db.alwaysShowNameFilter, else DEFAULT_ALWAYS_SHOW_NAME_FILTER. Never writes.
+function UI.ReadAlwaysShowNameFilter(db)
+    if type(db) == "table" and type(db.alwaysShowNameFilter) == "boolean" then
+        return db.alwaysShowNameFilter
+    end
+    return UI.DEFAULT_ALWAYS_SHOW_NAME_FILTER
+end
+
+-- Stores a boolean; returns true on success, false (no change) otherwise.
+function UI.WriteAlwaysShowNameFilter(db, b)
+    if type(db) ~= "table" or type(b) ~= "boolean" then return false end
+    db.alwaysShowNameFilter = b
+    return true
+end
+
+-- Pure: the name window shows with the games window, or with a social frame when the option is on.
+function UI.NameFilterVisible(alwaysShow, socialOpen, gamesShown)
+    if gamesShown == true then return true end
+    return alwaysShow == true and socialOpen == true
+end
+
+-- Removes windowScale, showPlayerCounts and alwaysShowNameFilter only.
 function UI.ResetOptions(db)
     if type(db) ~= "table" then return end
     db.windowScale = nil
     db.showPlayerCounts = nil
+    db.alwaysShowNameFilter = nil
 end
 
 -- Pure: header text, with the " (count)" suffix only when showCounts is true.
@@ -658,7 +680,8 @@ function UI.NextSocialState(state, event, ctx)
 
     if event == "social_shown" then
         -- ctx.openWithFriends == false (the saved preference) turns auto-open off.
-        if c.windowShown ~= true and not dismissed and c.openWithFriends ~= false then
+        -- ctx.freshOpen == true: no other social frame was open, so a stale dismissal never overrides the preference.
+        if c.windowShown ~= true and (not dismissed or c.freshOpen == true) and c.openWithFriends ~= false then
             autoOpened = true
             action = "show"
         end
@@ -686,6 +709,17 @@ end
 local socialState = { autoOpened = false, dismissed = false }
 -- Hooked social frames: name -> frame object.
 local hooked = {}
+
+local function countSocialOpen()
+    local n = 0
+    for _, f in pairs(hooked) do
+        if type(f) == "table" and type(f.IsShown) == "function" then
+            local ok, shown = pcall(f.IsShown, f)
+            if ok and shown then n = n + 1 end
+        end
+    end
+    return n
+end
 
 local function anySocialOpen()
     for _, f in pairs(hooked) do
@@ -782,7 +816,7 @@ end
 local STRIP_TOP = 24          -- window units: strip distance below the top of the window
 local SLIDER_LABEL_ROOM = 16  -- on-screen room above the slider for the label row
 local optionsFailed = false
-local scaleSlider, scaleValueText, countCheck, resetButton
+local scaleSlider, scaleValueText, countCheck, nameCheck, resetButton
 
 local function formatScaleText(v)
     local text = string.format("%.2f", v)
@@ -805,8 +839,10 @@ layoutOptions = function()
     local slot = SLIDER_SLOT / s
     countCheck:ClearAllPoints()
     countCheck:SetPoint("TOPLEFT", optionsStrip, "TOPLEFT", 8, -slot)
+    nameCheck:ClearAllPoints()
+    nameCheck:SetPoint("TOPLEFT", optionsStrip, "TOPLEFT", 8, -(slot + 26))
     resetButton:ClearAllPoints()
-    resetButton:SetPoint("TOPLEFT", optionsStrip, "TOPLEFT", 12, -(slot + 28))
+    resetButton:SetPoint("TOPLEFT", optionsStrip, "TOPLEFT", 12, -(slot + 54))
 end
 
 syncOptions = function()
@@ -818,6 +854,7 @@ syncOptions = function()
     scaleSlider:SetValue(v)
     scaleValueText:SetText(formatScaleText(v))
     countCheck:SetChecked(UI.ReadShowCounts(getDb()))
+    nameCheck:SetChecked(UI.ReadAlwaysShowNameFilter(getDb()))
     syncing = false
 end
 
@@ -891,6 +928,20 @@ local function createOptions()
     end)
     countCheck = check
 
+    local nameBox = CreateFrame("CheckButton", nil, strip, "UICheckButtonTemplate")
+    nameBox:SetSize(CHECK_SIZE, CHECK_SIZE)
+    local nameBoxText = nameBox.Text or nameBox.text
+    if not nameBoxText then
+        nameBoxText = nameBox:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        nameBoxText:SetPoint("LEFT", nameBox, "RIGHT", CHECK_GAP, 0)
+    end
+    nameBoxText:SetText("Always Show Name Filter")
+    nameBox:SetScript("OnClick", function(self)
+        UI.WriteAlwaysShowNameFilter(getDb(), self:GetChecked() and true or false)
+        pcall(UI.UpdateNameFrame)
+    end)
+    nameCheck = nameBox
+
     local reset = CreateFrame("Button", nil, strip, "UIPanelButtonTemplate")
     reset:SetSize(140, 22)
     reset:SetText("Reset to defaults")
@@ -898,6 +949,7 @@ local function createOptions()
         UI.ResetOptions(getDb())
         ApplyScale()
         syncOptions()
+        pcall(UI.UpdateNameFrame)
         UI.Refresh()
     end)
     resetButton = reset
@@ -917,7 +969,7 @@ local function ensureOptions()
         if optionsStrip then
             pcall(optionsStrip.Hide, optionsStrip)
         end
-        optionsStrip, scaleSlider, scaleValueText, countCheck, resetButton = nil, nil, nil, nil, nil
+        optionsStrip, scaleSlider, scaleValueText, countCheck, nameCheck, resetButton = nil, nil, nil, nil, nil, nil
         return false
     end
     layoutOptions()
@@ -963,21 +1015,144 @@ function UI.HandleScaleCommand(argText)
     end
 end
 
-local nameLabel, nameInput, gameHeading
+UI.SOCIAL_FRAME_NAMES = { "FriendsFrame", "SocialUIFrame" }
 
--- Anchors the Name label, edit box and heading below the options strip.
-local function layoutNameFilter(stripH)
-    if not (frame and nameLabel and nameInput and gameHeading) then
-        return
+-- Name filter window: a small frame with one edit box and a grey placeholder.
+local nameFrame, nameInput, namePlaceholder
+
+local function updatePlaceholder()
+    if not (namePlaceholder and nameInput) then return end
+    local text = nameInput:GetText()
+    local focused = nameInput.HasFocus and nameInput:HasFocus()
+    if (text == nil or text == "") and not focused then
+        namePlaceholder:Show()
+    else
+        namePlaceholder:Hide()
     end
-    local parent = frame.InsetBg or frame
-    nameLabel:ClearAllPoints()
-    nameLabel:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, -(8 + stripH + 4))
-    nameInput:ClearAllPoints()
-    nameInput:SetPoint("LEFT", nameLabel, "RIGHT", 8, 0)
-    nameInput:SetPoint("RIGHT", parent, "RIGHT", -28, 0)
-    gameHeading:ClearAllPoints()
-    gameHeading:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, -(8 + stripH + NAME_ROW_HEIGHT))
+end
+
+local function createNameFrame()
+    local okF, f = pcall(CreateFrame, "Frame", "ForeverFilterNameFrame", UIParent, "BackdropTemplate")
+    if not (okF and f) then
+        f = CreateFrame("Frame", "ForeverFilterNameFrame", UIParent)
+    end
+    f:SetHeight(NAME_FRAME_HEIGHT)
+    f:SetFrameStrata("MEDIUM")
+    pcall(function()
+        if f.SetBackdrop then
+            f:SetBackdrop({
+                bgFile = "Interface\\Buttons\\WHITE8X8",
+                edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+                edgeSize = 12,
+                insets = { left = 3, right = 3, top = 3, bottom = 3 },
+            })
+            f:SetBackdropColor(0, 0, 0, 0.8)
+        end
+    end)
+    f:Hide()
+    nameFrame = f
+
+    local okE, box = pcall(CreateFrame, "EditBox", nil, f, "InputBoxTemplate")
+    if not (okE and box) then
+        box = CreateFrame("EditBox", nil, f)
+        box:SetFontObject("ChatFontNormal")
+    end
+    box:SetPoint("TOPLEFT", f, "TOPLEFT", 10, -4)
+    box:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, 4)
+    box:SetAutoFocus(false)
+    box:SetMaxLetters(NAME_MAX_LETTERS)
+    box:SetText(nameText)
+    box:SetScript("OnTextChanged", function(self)
+        updatePlaceholder()
+        UI.OnNameChanged(self:GetText())
+    end)
+    box:SetScript("OnEscapePressed", function(self)
+        self:ClearFocus()
+    end)
+    box:SetScript("OnEnterPressed", function(self)
+        self:ClearFocus()
+    end)
+    box:SetScript("OnEditFocusGained", updatePlaceholder)
+    box:SetScript("OnEditFocusLost", updatePlaceholder)
+    nameInput = box
+
+    namePlaceholder = box:CreateFontString(nil, "OVERLAY", "GameFontDisable")
+    namePlaceholder:SetPoint("LEFT", box, "LEFT", 0, 0)
+    namePlaceholder:SetText("Filter Friends")
+    updatePlaceholder()
+end
+
+-- First shown hooked social frame, in SOCIAL_FRAME_NAMES order.
+local function firstShownSocialFrame()
+    for _, name in ipairs(UI.SOCIAL_FRAME_NAMES) do
+        local f = hooked[name]
+        if type(f) == "table" and type(f.IsShown) == "function" then
+            local ok, shown = pcall(f.IsShown, f)
+            if ok and shown then return f end
+        end
+    end
+    return nil
+end
+
+-- Anchors the name window above the first shown social frame, else above the games window.
+local function anchorNameFrame()
+    if not nameFrame then return end
+    local target = firstShownSocialFrame()
+    if not target and frame and frame:IsShown() then
+        target = frame
+    end
+    if not target then return end
+    pcall(function()
+        nameFrame:ClearAllPoints()
+        nameFrame:SetPoint("BOTTOMLEFT", target, "TOPLEFT", 0, NAME_FRAME_GAP)
+        -- Width in the target's own units, scale relative to UIParent (the name window's parent).
+        local w, s
+        if target == frame then
+            w, s = target:GetWidth(), target:GetScale()
+        else
+            local l, r = target:GetLeft(), target:GetRight()
+            if isFinite(l) and isFinite(r) then w = r - l end
+            local eff, ui = target:GetEffectiveScale(), UIParent:GetEffectiveScale()
+            if isFinite(eff) and isFinite(ui) and ui > 0 then s = eff / ui end
+        end
+        if isFinite(w) and w > 0 then nameFrame:SetWidth(w) end
+        if isFinite(s) and s > 0 then nameFrame:SetScale(s) end
+    end)
+end
+
+-- Shows or hides the name window per UI.NameFilterVisible. Hiding keeps the text and the filter.
+function UI.UpdateNameFrame()
+    local visible = UI.NameFilterVisible(UI.ReadAlwaysShowNameFilter(getDb()), anySocialOpen(),
+        frame ~= nil and frame:IsShown() == true)
+    if visible then
+        if not nameFrame then createNameFrame() end
+        anchorNameFrame()
+        nameFrame:Show()
+        updatePlaceholder()
+    elseif nameFrame then
+        nameFrame:Hide()
+    end
+end
+
+-- Set while our own code hides the window (friends list closing), so the OnHide safety net never saves.
+local internalHide = false
+
+local function escapeIsDown()
+    if type(IsKeyDown) ~= "function" then return false end
+    local ok, down = pcall(IsKeyDown, "ESCAPE")
+    return ok and down == true
+end
+
+-- The player closed the games window: remember it (same value the icon button saves).
+function UI.SaveWindowClosedChoice()
+    getDb().openWithFriends = false
+end
+
+-- Hide for our own reasons (friends list closed). Never saves the preference.
+function UI.HideInternal()
+    internalHide = true
+    pcall(UI.Hide)
+    internalHide = false
 end
 
 local function create()
@@ -1070,32 +1245,6 @@ local function create()
     scrollFrame:SetPoint("TOPLEFT", frame.InsetBg or frame, "TOPLEFT", 8, -8)
     scrollFrame:SetPoint("BOTTOMRIGHT", frame.InsetBg or frame, "BOTTOMRIGHT", -28, 8)
 
-    nameLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    nameLabel:SetText("Name")
-    local okE, box = pcall(CreateFrame, "EditBox", nil, frame, "InputBoxTemplate")
-    if not (okE and box) then
-        box = CreateFrame("EditBox", nil, frame)
-        box:SetFontObject("ChatFontNormal")
-    end
-    box:SetAutoFocus(false)
-    box:SetMaxLetters(NAME_MAX_LETTERS)
-    box:SetHeight(20)
-    box:SetText(nameText)
-    box:SetScript("OnTextChanged", function(self)
-        UI.OnNameChanged(self:GetText())
-    end)
-    box:SetScript("OnEscapePressed", function(self)
-        self:ClearFocus()
-    end)
-    box:SetScript("OnEnterPressed", function(self)
-        self:ClearFocus()
-    end)
-    nameInput = box
-    gameHeading = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    gameHeading:SetText("Game Filter")
-    gameHeading:SetJustifyH("LEFT")
-    layoutNameFilter(0)
-
     content = CreateFrame("Frame", nil, scrollFrame)
     content:SetSize(FRAME_WIDTH - 60, 1)
     scrollFrame:SetScrollChild(content)
@@ -1122,6 +1271,38 @@ local function create()
             self:UnregisterEvent(event)
         end
         socialState = UI.NextSocialState(socialState, "window_hidden", { anySocialOpen = anySocialOpen() })
+        -- Safety net: a hide that is not one of our internal paths and not Escape, while a
+        -- social frame is open, is the player closing the window (its X). Same saved value
+        -- as the icon button closing it.
+        pcall(function()
+            if not internalHide and not escapeIsDown() and anySocialOpen() then
+                UI.SaveWindowClosedChoice()
+            end
+        end)
+    end)
+    -- The window's own X is an explicit choice: remember it. Escape and hiding with the
+    -- friends list do not go through this button. The template's close button is the
+    -- parentKey child CloseButton (UIPanelCloseButtonDefaultAnchors, OnClick =
+    -- UIPanelCloseButton_OnClick -> HideUIPanel(parent)); the global-name lookup covers
+    -- templates that name it "$parentCloseButton" instead of keying it.
+    pcall(function()
+        local candidates = { rawget(frame, "CloseButton") or frame.CloseButton }
+        local g = UI.LookupFrame("ForeverFilterFrameCloseButton")
+        if g ~= nil then candidates[#candidates + 1] = g end
+        local seen = {}
+        for _, close in ipairs(candidates) do
+            if type(close) == "table" and not seen[close] and type(close.HookScript) == "function" then
+                seen[close] = true
+                local ok = pcall(close.HookScript, close, "OnClick", function()
+                    UI.SaveWindowClosedChoice()
+                end)
+                if not ok then
+                    pcall(close.HookScript, close, "PreClick", function()
+                        UI.SaveWindowClosedChoice()
+                    end)
+                end
+            end
+        end
     end)
     -- The strip is closed whenever the window hides, so it is closed on the next show.
     frame:HookScript("OnHide", function()
@@ -1130,12 +1311,14 @@ local function create()
         if optionsStrip then
             optionsStrip:Hide()
         end
+        pcall(UI.UpdateNameFrame)
     end)
     frame:HookScript("OnShow", function()
         optionsOpen = false
         if optionsStrip then
             optionsStrip:Hide()
         end
+        pcall(UI.UpdateNameFrame)
     end)
 end
 
@@ -1279,22 +1462,24 @@ function UI.Refresh()
     end
     content:SetHeight(math.max(1, rowArea))
 
-    local topArea = TOP_AREA_HEIGHT
-    local windowHeight = UI.ComputeWindowHeightWithStrip(rowArea, UIParent:GetHeight(), isEmpty, stripH + topArea)
+    local windowHeight = UI.ComputeWindowHeightWithStrip(rowArea, UIParent:GetHeight(), isEmpty, stripH)
     frame:SetHeight(windowHeight)
     if optionsStrip then
         optionsStrip:SetHeight(math.max(1, stripH))
     end
-    layoutNameFilter(stripH)
     scrollFrame:ClearAllPoints()
-    scrollFrame:SetPoint("TOPLEFT", frame.InsetBg or frame, "TOPLEFT", 8, -(8 + stripH + topArea))
+    scrollFrame:SetPoint("TOPLEFT", frame.InsetBg or frame, "TOPLEFT", 8, -(8 + stripH))
     scrollFrame:SetPoint("BOTTOMRIGHT", frame.InsetBg or frame, "BOTTOMRIGHT", -28, 8)
     if left and top then
         frame:ClearAllPoints()
         frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
     end
-    if CHROME_HEIGHT + stripH + topArea + rowArea <= windowHeight then
+    if CHROME_HEIGHT + stripH + rowArea <= windowHeight then
         scrollFrame:SetVerticalScroll(0)
+    end
+    -- The name window follows the games window width when it is anchored above it.
+    if nameFrame and nameFrame:IsShown() then
+        UI.UpdateNameFrame()
     end
 
     local schedule, newLeft = UI.NextRetry(anyPending, retriesLeft)
@@ -1347,11 +1532,16 @@ function UI.Hide()
     end
 end
 
+-- /ff and the minimap button. Counts as an explicit choice (saved) only while a social frame is open.
 function UI.Toggle()
-    if frame and frame:IsShown() then
-        UI.Hide()
-    else
+    local opening = not (frame and frame:IsShown())
+    if anySocialOpen() then
+        getDb().openWithFriends = opening
+    end
+    if opening then
         UI.Show()
+    else
+        UI.Hide()
     end
 end
 
@@ -1359,7 +1549,7 @@ end
 -- (opening saves true, closing saves false) in ForeverFilterDB.openWithFriends.
 function UI.ToggleFromFriendsButton()
     if frame and frame:IsShown() then
-        getDb().openWithFriends = false
+        UI.SaveWindowClosedChoice()
         UI.Hide()
     else
         getDb().openWithFriends = true
@@ -1374,7 +1564,7 @@ function UI.LookupFrame(name)
     return g[name]
 end
 
-local SOCIAL_FRAME_NAMES = { "FriendsFrame", "SocialUIFrame" }
+local SOCIAL_FRAME_NAMES = UI.SOCIAL_FRAME_NAMES
 
 local function windowIsShown()
     return frame ~= nil and frame:IsShown() == true
@@ -1384,8 +1574,10 @@ local function onSocialShown()
     pcall(function()
         local wasShown = windowIsShown()
         local newState, action = UI.NextSocialState(socialState, "social_shown",
-            { windowShown = wasShown, openWithFriends = UI.ReadOpenWithFriends(getDb()) })
+            { windowShown = wasShown, openWithFriends = UI.ReadOpenWithFriends(getDb()),
+              freshOpen = countSocialOpen() <= 1 })
         socialState = newState
+        pcall(UI.UpdateNameFrame)
         if action == "show" then
             openWindow()
         elseif wasShown then
@@ -1412,8 +1604,9 @@ local function onSocialHidden()
             { anySocialOpen = anySocialOpen(), windowShown = windowIsShown() })
         socialState = newState
         if action == "hide" then
-            UI.Hide()
+            UI.HideInternal()
         end
+        pcall(UI.UpdateNameFrame)
     end)
 end
 

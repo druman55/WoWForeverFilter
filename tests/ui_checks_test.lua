@@ -1162,8 +1162,7 @@ property("Feature: game-list-polish, Example tests: UI.Refresh sizing, anchoring
         local heights = callsOf(mainFrame, "SetHeight")
         assert(#heights == 1, "SetHeight called " .. #heights .. " times")
         -- friends-list-filter 5.1: five game rows plus the Offline row (24 + 6 gap) and the 7 px divider.
-        -- name-filter-input 2.7: plus the 48 px top area (Name row and heading).
-        local withOffline = fiveRows + 24 + 6 + 7 + 48
+        local withOffline = fiveRows + 24 + 6 + 7
         assert(heights[1][2] == withOffline, "SetHeight(" .. tostring(heights[1][2]) .. ") ~= " .. withOffline)
 
         -- Requirement 2.5: re-anchored by TOPLEFT after the height change.
@@ -4619,8 +4618,7 @@ property("Feature: friends-list-filter, Example tests: Offline row, divider and 
             local t = rawget(f, "text")
             assert(not (type(t) == "string" and t:lower():find("no friends")), "empty-state message shown")
         end
-        -- name-filter-input 2.7: the window includes the top area (Name row and heading, 48).
-        local want = env.UI.ComputeWindowHeight(env.UI.RowHeight(nil) + 48, 1080, false)
+        local want = env.UI.ComputeWindowHeight(env.UI.RowHeight(nil), 1080, false)
         assert(flLastHeight(env.win) == want, "height " .. tostring(flLastHeight(env.win)) .. " vs " .. want)
         assert(want > 120 or want == 120)
     end)
@@ -4653,7 +4651,7 @@ property("Feature: friends-list-filter, Example tests: Offline row, divider and 
         assert(divY == -(2 * (rh + ROW_GAP)), "divider y " .. tostring(divY))
         assert(offY == divY - DIVIDER_H, "offline y " .. tostring(offY) .. " divider y " .. tostring(divY))
         local area = 3 * rh + 2 * ROW_GAP + DIVIDER_H
-        assert(flLastHeight(env.win) == env.UI.ComputeWindowHeight(area + 48, 1080, false), "height with divider")
+        assert(flLastHeight(env.win) == env.UI.ComputeWindowHeight(area, 1080, false), "height with divider")
 
         -- Counts off: no count on the Offline label.
         env.ns.db.showPlayerCounts = false
@@ -6071,11 +6069,12 @@ property("Feature: name-filter-input, Example tests: Name label, edit box, headi
     end
 
     local ok, err = pcall(function()
-        local mainFrame, scroll, box, content
+        local mainFrame, scroll, box, content, nameWin
         CreateFrame = function(kindName, name, parent)
             local f = recFrame(name, kindName)
             if name == "ForeverFilterFrame" then mainFrame = f end
             if name == "ForeverFilterScrollFrame" then scroll = f end
+            if name == "ForeverFilterNameFrame" then nameWin = f end
             if kindName == "EditBox" and not box then box = f end
             if kindName == "Frame" and not name and scroll and parent == scroll and not content then content = f end
             return f
@@ -6094,11 +6093,50 @@ property("Feature: name-filter-input, Example tests: Name label, edit box, headi
         assert(UI.GetNameQuery() == "", "fresh load has a non-empty query")
 
         UI.Show()
-        assert(mainFrame and box and scroll, "window, edit box or scroll frame was not created")
+        assert(mainFrame and scroll, "window or scroll frame was not created")
+        -- The name window is its own frame, created when the games window shows.
+        fire(mainFrame, "OnShow")
+        assert(nameWin and box, "name window or edit box was not created")
 
-        -- Requirements 1.1, 1.2: label "Name", heading "Game Filter", also with zero game rows.
-        assert(hasText("Name"), "no Name label")
-        assert(hasText("Game Filter"), "no Game Filter heading with zero game rows")
+        -- task 9.1: the games window has no Name label, edit box or heading; the name window has the placeholder.
+        assert(not hasText("Name"), "games window still has a Name label")
+        assert(not hasText("Game Filter"), "games window still has a Game Filter heading")
+        assert(hasText("Filter Friends"), "no Filter Friends placeholder")
+        local placeholder
+        for _, f in ipairs(frames) do
+            if f.kind == "FontString" then
+                for _, c in ipairs(callsOf(f, "SetText")) do
+                    if c[2] == "Filter Friends" then placeholder = f end
+                end
+            end
+        end
+        assert(#callsOf(placeholder, "Show") >= 1, "placeholder not shown for empty text")
+
+        -- Anchor: above the games window when no social frame is shown.
+        local function lastAnchor(f)
+            local last
+            for _, c in ipairs(callsOf(f, "SetPoint")) do
+                if c[2] == "BOTTOMLEFT" then last = c end
+            end
+            return last
+        end
+        local a = lastAnchor(nameWin)
+        assert(a and a[3] == mainFrame and a[4] == "TOPLEFT", "name window not anchored above the games window")
+        assert(#callsOf(nameWin, "Show") >= 1, "name window not shown with the games window")
+
+        -- Anchor: above the first shown social frame, which wins over the games window.
+        local social = recFrame("FriendsFrame", "Frame")
+        rawset(social, "GetLeft", function() return 100 end)
+        rawset(social, "GetRight", function() return 400 end)
+        rawset(social, "GetEffectiveScale", function() return 1 end)
+        UIParent.GetEffectiveScale = function() return 1 end
+        UI.LookupFrame = function(n) if n == "FriendsFrame" then return social end end
+        UI.TryHookSocialFrames()
+        UI.UpdateNameFrame()
+        a = lastAnchor(nameWin)
+        assert(a and a[3] == social and a[4] == "TOPLEFT", "name window not anchored above the social frame")
+        local widths = callsOf(nameWin, "SetWidth")
+        assert(widths[#widths][2] == 300, "name window width differs from the social frame")
 
         -- Requirement 2.1 and 2.3 (limits and initial text).
         local ml = callsOf(box, "SetMaxLetters")
@@ -6118,15 +6156,16 @@ property("Feature: name-filter-input, Example tests: Name label, edit box, headi
         end
         box.text = ""
 
-        -- Requirements 2.6, 2.7: window height is 66 + topArea + rowArea; scroll offset has the top area.
-        local topArea = 28 + 20
+        -- task 9.1: window height is 66 + rowArea again; scroll offset has no top area.
+        local topArea = 0
         local rowArea
         local function checkLayout(label)
             local cs = callsOf(content, "SetHeight")
             rowArea = cs[#cs][2]
             local hs = callsOf(mainFrame, "SetHeight")
-            assert(hs[#hs][2] == 66 + topArea + rowArea, string.format("%s: height %s ~= 66 + %d + %d",
-                label, tostring(hs[#hs][2]), topArea, rowArea))
+            local want = math.max(120, 66 + topArea + rowArea) -- 120 is the minimum window height
+            assert(hs[#hs][2] == want, string.format("%s: height %s ~= %d (66 + %d + %d, min 120)",
+                label, tostring(hs[#hs][2]), want, topArea, rowArea))
             local top
             for _, c in ipairs(callsOf(scroll, "SetPoint")) do
                 if c[2] == "TOPLEFT" then top = c end
@@ -6147,6 +6186,8 @@ property("Feature: name-filter-input, Example tests: Name label, edit box, headi
         box.scripts.OnTextChanged(box)
         assert(reapplies == 1, "Reapply called " .. reapplies .. " times")
         assert(UI.GetNameQuery() == "ann", "typed text not stored")
+        local pc = placeholder.calls
+        assert(pc[#pc][1] == "Hide", "placeholder not hidden while there is text")
 
         -- Requirement 5.5: the text survives hide and show.
         fire(mainFrame, "OnHide")
@@ -7198,7 +7239,263 @@ property("Window icon: texture path is set on creation and a missing portrait do
 end)
 
 ----------------------------------------------------------------------
+-- Feature: name-filter-input, task 9.2: Always Show Name Filter option and visibility rule
+-- Validates: the UI.NameFilterVisible truth table, option reading, defaults and reset
+----------------------------------------------------------------------
+property("Feature: name-filter-input, Task 9.2: NameFilterVisible matches the truth table", function()
+    local UI = loadUI({})
+    local vals = { true, false, nil, 0, "x", {} }
+    for i = 1, ITERATIONS do
+        local a, s, g = pick(vals), pick(vals), pick(vals)
+        local want = (g == true) or (a == true and s == true)
+        local got = UI.NameFilterVisible(a, s, g)
+        assert(got == want, string.format("NameFilterVisible(%s, %s, %s) = %s", show(a), show(s), show(g), show(got)))
+    end
+    -- Every boolean combination.
+    for _, a in ipairs({ true, false }) do
+        for _, s in ipairs({ true, false }) do
+            for _, g in ipairs({ true, false }) do
+                assert(UI.NameFilterVisible(a, s, g) == (g or (a and s)), "truth table row differs")
+            end
+        end
+    end
+end)
+
+property("Feature: name-filter-input, Task 9.2: option reading, writing and reset", function()
+    local UI = loadUI({})
+    assert(UI.DEFAULT_ALWAYS_SHOW_NAME_FILTER == true)
+    for i = 1, ITERATIONS do
+        local stored = pick({ true, false, nil, 0, "x", {}, nan })
+        local db = { alwaysShowNameFilter = stored, other = i }
+        local before = optDeepCopy(db)
+        local want = true
+        if type(stored) == "boolean" then want = stored end
+        assert(UI.ReadAlwaysShowNameFilter(db) == want, "read differs for " .. show(stored))
+        assert(optDeepEqual(before, db), "read wrote to the db")
+        UI.ResetOptions(db)
+        assert(db.alwaysShowNameFilter == nil and db.other == i, "reset changed the wrong fields")
+        assert(UI.ReadAlwaysShowNameFilter(db) == true, "reset did not restore true")
+    end
+    assert(UI.ReadAlwaysShowNameFilter(nil) == true and UI.ReadAlwaysShowNameFilter("x") == true)
+    local db = {}
+    assert(UI.WriteAlwaysShowNameFilter(db, false) == true and db.alwaysShowNameFilter == false)
+    assert(UI.WriteAlwaysShowNameFilter(db, "no") == false and db.alwaysShowNameFilter == false)
+    assert(UI.WriteAlwaysShowNameFilter(nil, true) == false)
+end)
+
+property("Feature: name-filter-input, Task 9.2: checkbox saves the option and updates visibility", function()
+    withOptions(function(env, ctx)
+        local db = env.ns.db
+        env.UI.Show()
+        local gear = ctx.find("Button", env.win)
+        gear.scripts.OnClick(gear)
+        local strip = ctx.find("Frame", env.win)
+        local boxes = {}
+        for _, f in ipairs(ctx.created) do
+            if f.kind == "CheckButton" and f.parentFrame == strip then boxes[#boxes + 1] = f end
+        end
+        assert(#boxes == 2, "expected two checkboxes in the strip, got " .. #boxes)
+        local nameBox = boxes[2]
+        local label
+        for _, fs in ipairs(env.fontStrings) do
+            if rawget(fs, "owner") == nameBox then label = fs end
+        end
+        assert(label and label.text == "Always Show Name Filter", "checkbox label")
+        assert(nameBox.checked == true, "checkbox not checked by default")
+
+        local updates = 0
+        local orig = env.UI.UpdateNameFrame
+        env.UI.UpdateNameFrame = function() updates = updates + 1; return orig() end
+        nameBox.checked = false
+        nameBox.scripts.OnClick(nameBox)
+        assert(db.alwaysShowNameFilter == false, "option not saved")
+        assert(updates == 1, "visibility not updated by the checkbox")
+
+        -- Reset restores true and updates visibility.
+        local reset = ctx.find("Button", strip)
+        reset.scripts.OnClick(reset)
+        assert(rawget(db, "alwaysShowNameFilter") == nil, "reset left the option")
+        assert(nameBox.checked == true, "checkbox not reset to checked")
+        assert(updates >= 2, "reset did not update visibility")
+    end)
+end)
+
+----------------------------------------------------------------------
 -- (append further properties above this line)
 ----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+-- Task 10: openWithFriends remembers the last explicit choice
+----------------------------------------------------------------------
+local function withCloseStub(env)
+    local close = { clicks = {} }
+    function close:HookScript(ev, fn) self.clicks[#self.clicks + 1] = fn end
+    function close:Click() for _, fn in ipairs(self.clicks) do fn(self) end end
+    local base = CreateFrame
+    CreateFrame = function(t, name, ...)
+        local f = base(t, name, ...)
+        if name == "ForeverFilterFrame" then rawset(f, "CloseButton", close) end
+        return f
+    end
+    return close
+end
+
+property("Task 10: window X saves false; button saves true; hide paths never save", function()
+    withWiring(300, 400, function(env)
+        local UI, db = env.UI, env.ns.db
+        local close = withCloseStub(env)
+        local social = env.social(100, 485, 900)
+        env.stubs.FriendsFrame = social
+        UI.TryHookSocialFrames()
+
+        social.hooks.OnShow() -- pref missing (true): window auto-opens, nothing saved
+        assert(env.win and env.win.shown and db.openWithFriends == nil, "auto-open must not save")
+        close:Click(); env.win:Hide() -- X
+        assert(db.openWithFriends == false, "X did not save false")
+
+        UI.ToggleFromFriendsButton() -- open via icon button
+        assert(db.openWithFriends == true and env.win.shown, "icon open did not save true")
+
+        -- Escape-style hide and hiding with the friends list leave the preference alone.
+        IsKeyDown = function(k) return k == "ESCAPE" end
+        env.win:Hide()
+        IsKeyDown = nil
+        assert(db.openWithFriends == true, "Escape hide changed the preference")
+        UI.Show()
+        social.shown = false; social.hooks.OnHide()
+        assert(not env.win.shown and db.openWithFriends == true, "friends list close changed the preference")
+
+        -- Next Friends List open follows the saved value, even after an X earlier in the session.
+        social.shown = true; social.hooks.OnShow()
+        assert(env.win.shown, "pref true did not open the window")
+        close:Click(); env.win:Hide()
+        assert(db.openWithFriends == false)
+        social.shown = false; social.hooks.OnHide()
+        social.shown = true; social.hooks.OnShow()
+        assert(not env.win.shown, "pref false opened the window")
+        assert(db.openWithFriends == false)
+    end)
+end)
+
+property("Task 10: /ff and the minimap button save only while a social frame is open", function()
+    withWiring(300, 400, function(env)
+        local UI, db = env.UI, env.ns.db
+        UI.Toggle() -- opens, no social frame
+        assert(env.win.shown and db.openWithFriends == nil, "saved with no social frame (open)")
+        UI.Toggle()
+        assert(not env.win.shown and db.openWithFriends == nil, "saved with no social frame (close)")
+
+        local social = env.social(100, 485, 900)
+        env.stubs.FriendsFrame = social
+        UI.TryHookSocialFrames()
+        social.hooks.OnShow() -- auto-open
+        UI.Toggle()
+        assert(not env.win.shown and db.openWithFriends == false, "/ff close with social open did not save false")
+        UI.Toggle()
+        assert(env.win.shown and db.openWithFriends == true, "/ff open with social open did not save true")
+    end)
+end)
+
+property("Task 10: a stale dismissed flag never overrides the saved preference on a fresh open", function()
+    local UI = loadUI({})
+    for i = 1, ITERATIONS do
+        local pref = pick({ true, false, nil })
+        local dismissed = random() < 0.5
+        local fresh = random() < 0.5
+        local _, action = UI.NextSocialState({ dismissed = dismissed }, "social_shown",
+            { windowShown = false, openWithFriends = pref, freshOpen = fresh })
+        local expect = pref ~= false and (fresh or not dismissed)
+        assert((action == "show") == expect, string.format("pref=%s dismissed=%s fresh=%s action=%s",
+            tostring(pref), tostring(dismissed), tostring(fresh), tostring(action)))
+    end
+end)
+
+property("Task 10: Escape-dismissed window reopens on the next Friends List open when pref is true", function()
+    withWiring(300, 400, function(env)
+        local UI, db = env.UI, env.ns.db
+        local social = env.social(100, 485, 900)
+        env.stubs.FriendsFrame = social
+        UI.TryHookSocialFrames()
+        social.hooks.OnShow()
+        assert(env.win.shown)
+        IsKeyDown = function(k) return k == "ESCAPE" end
+        env.win:Hide() -- Escape with the list open: dismissed, nothing saved
+        IsKeyDown = nil
+        assert(db.openWithFriends == nil)
+        social.shown = false; social.hooks.OnHide()
+        social.shown = true; social.hooks.OnShow()
+        assert(env.win.shown, "preference true did not reopen the window")
+    end)
+end)
+
+----------------------------------------------------------------------
+-- Task 11: the games window X saves like the icon button
+----------------------------------------------------------------------
+property("Task 11: clicking the close button saves false and the window hides", function()
+    withWiring(300, 400, function(env)
+        local UI, db = env.UI, env.ns.db
+        local close = withCloseStub(env)
+        function close:Click()
+            for _, fn in ipairs(self.clicks) do fn(self) end
+            env.win:Hide() -- UIPanelCloseButton_OnClick -> HideUIPanel(parent)
+        end
+        UI.Show()
+        assert(env.win.shown)
+        close:Click()
+        assert(db.openWithFriends == false and not env.win.shown, "X click did not save false and hide")
+    end)
+end)
+
+property("Task 11: close button found by global name when the key is absent", function()
+    withWiring(300, 400, function(env)
+        local UI, db = env.UI, env.ns.db
+        local hooks = {}
+        local g = { HookScript = function(_, ev, fn) hooks[#hooks + 1] = fn end }
+        local oldLookup = UI.LookupFrame
+        UI.LookupFrame = function(name)
+            if name == "ForeverFilterFrameCloseButton" then return g end
+            return oldLookup(name)
+        end
+        UI.Show()
+        assert(#hooks == 1, "global-name close button was not hooked")
+        hooks[1]()
+        assert(db.openWithFriends == false)
+        UI.LookupFrame = oldLookup
+    end)
+end)
+
+property("Task 11: OnHide safety net saves false only for a plain hide with a social frame open", function()
+    withWiring(300, 400, function(env)
+        local UI, db = env.UI, env.ns.db
+        local social = env.social(100, 485, 900)
+        env.stubs.FriendsFrame = social
+        UI.TryHookSocialFrames()
+        social.hooks.OnShow()
+        assert(env.win.shown)
+
+        -- Escape: nothing saved.
+        IsKeyDown = function(k) return k == "ESCAPE" end
+        env.win:Hide()
+        IsKeyDown = nil
+        assert(db.openWithFriends == nil, "Escape saved")
+
+        -- Friends list closing: nothing saved.
+        UI.Show()
+        social.shown = false; social.hooks.OnHide()
+        assert(not env.win.shown and db.openWithFriends == nil, "friends list close saved")
+
+        -- No social frame open: nothing saved.
+        UI.Show()
+        env.win:Hide()
+        assert(db.openWithFriends == nil, "hide without social frame saved")
+
+        -- Social frame open, plain hide (the X): saves false.
+        social.shown = true
+        UI.Show()
+        env.win:Hide()
+        assert(db.openWithFriends == false, "safety net did not save false")
+    end)
+end)
+
 print(string.format("%d/%d properties passed", total - failures, total))
 os.exit(failures == 0 and 0 or 1)

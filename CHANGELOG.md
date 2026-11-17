@@ -1,5 +1,10 @@
 # Forever Filter
 
+## v1.1.0
+
+- **Separate name filter:** The name box is now its own small window above the Friends List, with a "Filter Friends" placeholder. The games window holds only the options and the games list.
+- **Always Show Name Filter option:** New checkbox in the options, on by default. When on, the name filter shows whenever the Friends List is open. When off, it shows only while the games window is open.
+- **Remembers your choice:** Whether the games window opens with the Friends List now follows your last choice, whether you used the Friends List icon button, the window's close button, `/ff` or the minimap button.
 ## v1.0.2
 
 - **Wago:** Releases are now also published to Wago Addons.
