@@ -1,5 +1,8 @@
 # Forever Filter
 
+## v1.1.1
+
+- **Fixed: Friends List jumping to the top.** The Friends List no longer scrolls back to the top every few seconds when friends update. It also keeps your place when you change a game checkbox, the Offline option or the name filter. If the list gets shorter, it stops at the new bottom.
 ## v1.1.0
 
 - **Separate name filter:** The name box is now its own small window above the Friends List, with a "Filter Friends" placeholder. The games window holds only the options and the games list.

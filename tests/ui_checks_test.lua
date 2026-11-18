@@ -4277,6 +4277,15 @@ property("Feature: friends-list-filter, Example tests: the classic hook", functi
         if not ok then error(err, 0) end
     end
 
+    -- During an edit only the read-only getters and SetScrollPercentage may be called.
+    local function onlyReadOrRestore(h, label)
+        local allowed = { GetDerivedScrollOffset = true, GetDerivedScrollRange = true, SetScrollPercentage = true }
+        for _, name in ipairs(h.scrollCalls) do
+            assert(allowed[name], "forbidden scroll method during " .. label .. ": " .. tostring(name))
+        end
+        h.scrollCalls = {}
+    end
+
     local function d3Online() return { { isOnline = true, clientProgram = "D3" } } end
     local function wowOnline() return { { isOnline = true, clientProgram = "WoW", wowProjectID = 1 } } end
     local function setupList(h)
@@ -4300,21 +4309,24 @@ property("Feature: friends-list-filter, Example tests: the classic hook", functi
         local p = h.newProvider(list)
         h.drive(p)
         assert(h.ids(p:GetCollection()) == "4:h,5:i,1:d,3:2,2:9", "wrong result: " .. h.ids(p:GetCollection()))
-        assert(#h.scrollCalls == 0, "scroll method called during edit: " .. tostring(h.scrollCalls[1]))
+        onlyReadOrRestore(h, "edit")
         assert(h.counts.bnGetNum == 0 and h.counts.mutate == 0, "BN stubs were touched")
         assert(BNGetNumFriends() == 5, "BNGetNumFriends result changed")
 
         -- Second hook call with the already filtered provider: same result, no further edits.
         local flushes, inserts = p.flushes, p.inserts
+        h.scrollCalls = {}
         h.drive(p)
         assert(h.ids(p:GetCollection()) == "4:h,5:i,1:d,3:2,2:9", "second call changed the list")
         assert(p.flushes == flushes and p.inserts == inserts, "second call edited the provider")
+        assert(#h.scrollCalls == 0, "scroll method called for an unchanged result: " .. tostring(h.scrollCalls[1]))
+        h.scrollCalls = {}
 
         -- Check the game again: Reapply restores the original list.
         h.setChecked(d3, true)
         h.Filter.Reapply()
         assert(h.ids(p:GetCollection()) == original, "Reapply did not restore: " .. h.ids(p:GetCollection()))
-        assert(#h.scrollCalls == 0, "scroll method called during Reapply")
+        onlyReadOrRestore(h, "Reapply")
 
         -- Uncheck again, then hide the list frame: Reapply does nothing.
         h.setChecked(d3, false)
@@ -4336,6 +4348,7 @@ property("Feature: friends-list-filter, Example tests: the classic hook", functi
         local p = h.newProvider(list)
         h.drive(p)
         assert(p.flushes == 0 and p.inserts == 0, "provider edited with everything checked")
+        assert(#h.scrollCalls == 0, "scroll method called with everything checked")
         assert(h.ids(p:GetCollection()) == original, "content changed with everything checked")
     end)
 
@@ -7495,6 +7508,1035 @@ property("Task 11: OnHide safety net saves false only for a plain hide with a so
         env.win:Hide()
         assert(db.openWithFriends == false, "safety net did not save false")
     end)
+end)
+
+-- ScrollBox model. countRows() returns the number of rows the current provider lays out.
+local function scrollModel(rowHeight, visible)
+    local m = { rowHeight = rowHeight, visible = visible, offset = 0, calls = {}, hooks = {},
+                provider = nil, countRows = function() return 0 end }
+    local meta = { __index = function(_, name)
+        return function() m.calls[#m.calls + 1] = name end -- catch-all for other methods
+    end }
+    setmetatable(m, meta)
+    function m.GetDerivedExtent() return m.countRows() * m.rowHeight end
+    function m.GetDerivedScrollRange() return math.max(0, m.GetDerivedExtent() - m.visible) end
+    function m.GetDerivedScrollOffset() return m.offset end
+    -- Copy of ScrollBoxBaseMixin:FullUpdateInternal.
+    function m.fullUpdate()
+        local range = m.GetDerivedScrollRange()
+        if range == 0 then
+            m.offset = 0
+        else
+            m.offset = math.min(m.offset, range)
+        end
+    end
+    function m.SetScrollPercentage(_, pct)
+        m.calls[#m.calls + 1] = "SetScrollPercentage"
+        m.offset = pct * m.GetDerivedScrollRange()
+    end
+    function m.ScrollToBegin()
+        m.calls[#m.calls + 1] = "ScrollToBegin"
+        m.offset = 0
+    end
+    function m.GetDataProvider() return m.provider end
+    function m.SetDataProvider(self, p, retain)
+        m.provider = p
+        m.fullUpdate()
+        if not retain then self:ScrollToBegin() end
+        for _, fn in ipairs(m.hooks) do fn(self, p, retain) end -- post-hook
+    end
+    return m
+end
+
+-- Flat DataProvider whose edits run the model's full update.
+local function classicProvider(m, list)
+    local p = { collection = {} }
+    for i, e in ipairs(list) do p.collection[i] = e end
+    function p:GetCollection() return self.collection end
+    function p:GetSize() return #self.collection end
+    function p:Flush() self.collection = {}; m.fullUpdate() end
+    function p:InsertTable(t)
+        for _, e in ipairs(t) do self.collection[#self.collection + 1] = e end
+        m.fullUpdate()
+    end
+    function p:Remove(e)
+        for i, c in ipairs(self.collection) do
+            if c == e then table.remove(self.collection, i); break end
+        end
+        m.fullUpdate()
+    end
+    function p:Invalidate() m.fullUpdate() end
+    return p
+end
+
+----------------------------------------------------------------------
+-- Feature: friends-list-scroll-reset-fix, Property 1: Scroll position survives filtering
+--
+-- scrollModel copies the relevant Blizzard ScrollBox behavior: a provider edit runs a full
+-- update (FullUpdateInternal), where a scroll range of 0 sets the offset to 0 and any other
+-- range clamps the offset. Bug condition: offset before > 0 and no user filter change.
+--
+-- Validates: Requirements 1.1, 1.2, 1.3, 2.1, 2.2, 2.4
+----------------------------------------------------------------------
+property("Feature: friends-list-scroll-reset-fix, Property 1: Scroll position survives filtering", function()
+    local T_DIVIDER, T_BNET = 1, 3
+    local SECRET = {}
+    local globalNames = {
+        "print", "C_BattleNet", "FRIENDS_BUTTON_TYPE_DIVIDER", "FRIENDS_BUTTON_TYPE_WOW",
+        "FRIENDS_BUTTON_TYPE_BNET", "issecretvalue",
+    }
+    local savedGlobals = {}
+    for _, n in ipairs(globalNames) do savedGlobals[n] = _G[n] end
+    local EPS = 1e-6
+
+
+    local function newNode(m, data)
+        local node = { data = data, children = {} }
+        function node:GetData() return self.data end
+        function node:GetNodes() return self.children end
+        function node:Remove(child, skipInvalidation)
+            for i, c in ipairs(self.children) do
+                if c == child then table.remove(self.children, i); break end
+            end
+            if not skipInvalidation then m.fullUpdate() end
+        end
+        function node:InsertNode(child, index)
+            table.insert(self.children, index, child)
+            m.fullUpdate()
+        end
+        return node
+    end
+
+    -- Tree provider: a root with header and spacer nodes. Rows = every node below the root.
+    local function treeProvider(m, root)
+        local p = {}
+        function p:GetRootNode() return root end
+        function p:Invalidate() m.fullUpdate() end
+        m.countRows = function()
+            local n = 0
+            for _, node in ipairs(root:GetNodes()) do n = n + 1 + #node:GetNodes() end
+            return n
+        end
+        return p
+    end
+
+    -- One Filter instance wired to one scroll model. kind is "classic" or "social".
+    local function withFilter(kind, m, friends, body)
+        FRIENDS_BUTTON_TYPE_DIVIDER, FRIENDS_BUTTON_TYPE_WOW, FRIENDS_BUTTON_TYPE_BNET = T_DIVIDER, 2, T_BNET
+        issecretvalue = function(v) return v == SECRET end
+        print = function() end
+        C_BattleNet = {
+            GetFriendAccountInfo = function(i) return { gameAccountInfo = friends[i][1] } end,
+            GetFriendNumGameAccounts = function(i) return #friends[i] end,
+            GetFriendGameAccountInfo = function(i, j) return friends[i][j] end,
+        }
+        local shown = true
+        local env = {
+            hooksecurefunc = function(target, method, fn)
+                assert(target == m and method == "SetDataProvider", "unexpected hook target")
+                m.hooks[#m.hooks + 1] = fn
+            end,
+        }
+        local frame = { ScrollBox = m, IsShown = function() return shown end }
+        if kind == "classic" then env.FriendsListFrame = frame
+        else env.SocialUIFrame = { FriendsList = frame } end
+        local Filter, ns, restore = loadFilter(env)
+        ns.db = { checkedGames = {} }
+        Filter.Install()
+        local ok, err = pcall(body, Filter, ns)
+        restore()
+        for _, n in ipairs(globalNames) do _G[n] = savedGlobals[n] end
+        return ok, err
+    end
+
+    -- Independent expected result of the filter, dividers dropped when leading, trailing or doubled.
+    local function expectedClassic(list, hidden)
+        local kept = {}
+        for _, e in ipairs(list) do
+            if e.buttonType == T_DIVIDER or not hidden[e.id] then kept[#kept + 1] = e end
+        end
+        local out, seenFriend = {}, false
+        for i, e in ipairs(kept) do
+            if e.buttonType == T_DIVIDER then
+                local friendAfter = false
+                for j = i + 1, #kept do
+                    if kept[j].buttonType ~= T_DIVIDER then friendAfter = true; break end
+                end
+                local prev = out[#out]
+                if seenFriend and friendAfter and prev and prev.buttonType ~= T_DIVIDER then out[#out + 1] = e end
+            else
+                out[#out + 1] = e
+                seenFriend = true
+            end
+        end
+        return out
+    end
+
+    local function idsOf(list)
+        local out = {}
+        for i, e in ipairs(list) do out[i] = e.buttonType .. ":" .. tostring(e.id) end
+        return table.concat(out, ",")
+    end
+
+    -- Random scenario. Hidden friends are D3 players (D3 gets unchecked), kept ones are WoW.
+    local function genScenario(minHiddenFraction)
+        local n = random(1, 60)
+        local rowHeight = random(16, 40)
+        local fullHeight = n * rowHeight
+        local visible = random(1, math.min(600, math.max(1, fullHeight - 1)))
+        if fullHeight - visible <= 0 then visible = math.max(1, fullHeight - 1) end
+        local friends, hidden, hiddenCount = {}, {}, 0
+        for i = 1, n do
+            local hide = random() < (minHiddenFraction or 0.35)
+            if i == n and hiddenCount == 0 then hide = true end
+            if hide then
+                friends[i] = { { isOnline = true, clientProgram = "D3" } }
+                hidden[i] = true
+                hiddenCount = hiddenCount + 1
+            else
+                friends[i] = { { isOnline = true, clientProgram = "WoW", wowProjectID = 1 } }
+            end
+        end
+        return { n = n, rowHeight = rowHeight, visible = visible, friends = friends, hidden = hidden,
+                 hiddenCount = hiddenCount, fullRange = fullHeight - visible, offset = random(1, 2000) }
+    end
+
+    local function genClassicList(s)
+        local list = {}
+        for i = 1, s.n do
+            list[#list + 1] = { buttonType = T_BNET, id = i }
+            if random() < 0.15 then list[#list + 1] = { buttonType = T_DIVIDER, id = "d" .. i } end
+        end
+        return list
+    end
+
+    local function checkFinal(m, offsetBefore, label, extra)
+        local finalRange = m.GetDerivedScrollRange()
+        local want = math.min(offsetBefore, finalRange)
+        if math.abs(m.offset - want) > EPS then
+            return string.format("%s: offset %.2f before, final offset %.2f, expected %.2f (final range %.2f)%s",
+                label, offsetBefore, m.offset, want, finalRange, extra or "")
+        end
+        return nil
+    end
+
+    -- Each scenario returns nil on success or a counterexample string.
+    local scenarios = {}
+
+    local function classicRefresh(s, label)
+        local m = scrollModel(s.rowHeight, s.visible)
+        local list = genClassicList(s)
+        m.countRows = function() return m.provider and #m.provider.collection or 0 end
+        local offsetBefore = math.min(s.offset, s.fullRange)
+        local result
+        local ok, err = withFilter("classic", m, s.friends, function(_, ns)
+            ns.db.checkedGames[ns.UI.GameKey("D3")] = false
+            m.offset = offsetBefore
+            local p = classicProvider(m, list)
+            m:SetDataProvider(p, true) -- Blizzard: retain flag true, then our post-hook
+            result = checkFinal(m, offsetBefore, label, string.format(" [%d friends, %d hidden]", s.n, s.hiddenCount))
+            local want, got = idsOf(expectedClassic(list, s.hidden)), idsOf(p:GetCollection())
+            if not result and want ~= got then
+                result = label .. ": provider contents wrong: got " .. got .. " expected " .. want
+            end
+        end)
+        if not ok then return label .. ": raised " .. tostring(err) end
+        return result
+    end
+
+    scenarios.classic_refresh = function() return classicRefresh(genScenario(), "classic refresh") end
+
+    scenarios.classic_shrink = function()
+        local s = genScenario(0.6)
+        s.offset = s.fullRange -- bottom of the list: the filtered list must have a lower max offset
+        return classicRefresh(s, "classic shrink")
+    end
+
+    scenarios.classic_reapply = function()
+        local s = genScenario()
+        local m = scrollModel(s.rowHeight, s.visible)
+        m.countRows = function() return m.provider and #m.provider.collection or 0 end
+        local list = genClassicList(s)
+        local offsetBefore = math.min(s.offset, s.fullRange)
+        local result
+        local ok, err = withFilter("classic", m, s.friends, function(Filter, ns)
+            local d3 = ns.UI.GameKey("D3")
+            local p = classicProvider(m, list)
+            m:SetDataProvider(p, true) -- D3 still checked: no edit
+            m.offset = offsetBefore
+            ns.db.checkedGames[d3] = false -- the user unchecks D3
+            Filter.Reapply()
+            -- The user's own toggle triggers this Reapply; the scroll position must still hold.
+            result = checkFinal(m, offsetBefore, "classic Reapply", string.format(" [%d friends, %d hidden]", s.n, s.hiddenCount))
+            local want, got = idsOf(expectedClassic(list, s.hidden)), idsOf(p:GetCollection())
+            if not result and want ~= got then
+                result = "classic Reapply: provider contents wrong: got " .. got .. " expected " .. want
+            end
+        end)
+        if not ok then return "classic Reapply: raised " .. tostring(err) end
+        return result
+    end
+
+    scenarios.social_refresh = function()
+        local s = genScenario()
+        local m = scrollModel(s.rowHeight, s.visible)
+        local offsetBefore, result
+        local ok, err = withFilter("social", m, s.friends, function(_, ns)
+            ns.db.checkedGames[ns.UI.GameKey("D3")] = false
+            local root = newNode(m, nil)
+            local headers, wantIds = {}, {}
+            for h = 1, random(1, 3) do
+                headers[h] = newNode(m, { headerText = "H" .. h })
+                root.children[#root.children + 1] = headers[h]
+                if random() < 0.3 then root.children[#root.children + 1] = newNode(m, { spacer = true }) end
+            end
+            for i = 1, s.n do
+                local header = headers[random(#headers)]
+                header.children[#header.children + 1] = newNode(m, { friendIndex = i })
+            end
+            local p = treeProvider(m, root)
+            local total = m.countRows()
+            local fullRange = math.max(0, total * s.rowHeight - s.visible)
+            if fullRange <= 0 then return end -- not scrollable with headers counted: cannot happen, rows only grow
+            offsetBefore = math.min(s.offset, fullRange)
+            m.offset = offsetBefore
+            for h, header in ipairs(headers) do
+                local ids = {}
+                for _, node in ipairs(header.children) do
+                    local i = node:GetData().friendIndex
+                    if not s.hidden[i] then ids[#ids + 1] = tostring(i) end
+                end
+                wantIds[h] = table.concat(ids, ",")
+            end
+            m:SetDataProvider(p, true)
+            result = checkFinal(m, offsetBefore, "social refresh", string.format(" [%d friends, %d hidden]", s.n, s.hiddenCount))
+            for h, header in ipairs(headers) do
+                local ids = {}
+                for _, node in ipairs(header.children) do ids[#ids + 1] = tostring(node:GetData().friendIndex) end
+                local got = table.concat(ids, ",")
+                if not result and got ~= wantIds[h] then
+                    result = "social refresh: header " .. h .. " wrong: got " .. got .. " expected " .. wantIds[h]
+                end
+            end
+        end)
+        if not ok then return "social refresh: raised " .. tostring(err) end
+        return result
+    end
+
+    local order = { "classic_refresh", "classic_shrink", "classic_reapply", "social_refresh" }
+    local failed, first = {}, {}
+    for _ = 1, ITERATIONS do
+        for _, name in ipairs(order) do
+            local msg = scenarios[name]()
+            if msg then
+                failed[name] = (failed[name] or 0) + 1
+                first[name] = first[name] or msg
+            end
+        end
+    end
+    local lines = {}
+    for _, name in ipairs(order) do
+        if failed[name] then
+            lines[#lines + 1] = string.format("%s failed %d/%d, first counterexample: %s",
+                name, failed[name], ITERATIONS, first[name])
+        end
+    end
+    assert(#lines == 0, "\n     " .. table.concat(lines, "\n     "))
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-scroll-reset-fix, Property 2: Preservation
+--
+-- Inputs outside the bug condition (offset 0, or nothing hidden) keep the behavior observed
+-- on the unfixed code: no edit and no scroll call when nothing is hidden, a list at the top
+-- stays at the top without SetScrollPercentage, and the provider contents always equal
+-- referenceClassic, a recorded copy of the unfixed applyClassic decision logic.
+--
+-- Validates: Requirements 2.3, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6
+----------------------------------------------------------------------
+property("Feature: friends-list-scroll-reset-fix, Property 2: Preservation", function()
+    local T_DIVIDER, T_WOW, T_BNET = 1, 2, 3
+    local SECRET = setmetatable({}, { __tostring = function() return "SECRET" end })
+    local globalNames = {
+        "print", "C_BattleNet", "FRIENDS_BUTTON_TYPE_DIVIDER", "FRIENDS_BUTTON_TYPE_WOW",
+        "FRIENDS_BUTTON_TYPE_BNET", "issecretvalue",
+    }
+    local savedGlobals = {}
+    for _, n in ipairs(globalNames) do savedGlobals[n] = _G[n] end
+    local function isSecret(v) return v == SECRET end
+
+    -- Random Battle.net data, including secret, nil and non-table values.
+    local function genValue(choices) return choices[random(#choices)] end
+    local NAMES = { "alpha", "Beta", "gam", "", 5, false }
+    local function genName()
+        local r = random()
+        if r < 0.1 then return nil end
+        if r < 0.15 then return SECRET end
+        return genValue(NAMES)
+    end
+    local function genGameInfo()
+        local r = random()
+        if r < 0.1 then return nil end
+        if r < 0.15 then return SECRET end
+        if r < 0.2 then return "junk" end
+        local function field(list)
+            local q = random()
+            if q < 0.05 then return SECRET end
+            if q < 0.12 then return nil end
+            return genValue(list)
+        end
+        return {
+            isOnline = field({ true, true, false }),
+            clientProgram = field({ "WoW", "D3", "Pro", "App", "BSAp", "WTCG", "" }),
+            wowProjectID = field({ 1, 2, 11, 0 }),
+            characterName = genName(), realmName = genName(), richPresence = genName(),
+        }
+    end
+    local function genFriend()
+        local f = { games = {} }
+        local r = random()
+        if r < 0.06 then f.account = nil
+        elseif r < 0.1 then f.account = SECRET
+        elseif r < 0.13 then f.account = 7
+        else
+            f.account = { gameAccountInfo = genGameInfo(), accountName = genName(), battleTag = genName() }
+        end
+        r = random()
+        if r < 0.08 then f.count = nil
+        elseif r < 0.13 then f.count = SECRET
+        elseif r < 0.16 then f.count = "2"
+        else f.count = random(0, 3) end
+        for j = 1, 3 do f.games[j] = genGameInfo() end
+        return f
+    end
+
+    local GAME_KEYS = { "WoW:1", "WoW:2", "WoW:11", "WoW:nil", "D3:nil", "Pro:nil", "WTCG:nil",
+                        "?:nil", "@apps", "App:nil", "BSAp:nil", "@offline" }
+    local function genChecked()
+        local store = {}
+        for _, k in ipairs(GAME_KEYS) do
+            local r = random()
+            if r < 0.3 then store[k] = false
+            elseif r < 0.5 then store[k] = true
+            elseif r < 0.55 then store[k] = "junk" end
+        end
+        return store
+    end
+    local QUERIES = { "al", "BE", "zzz", "  a ", "g" }
+    local function genQuery()
+        if random() < 0.5 then return "" end
+        return genValue(QUERIES)
+    end
+
+    local function genList(n)
+        local list = {}
+        for i = 1, n do
+            local r = random()
+            local e
+            if r < 0.05 then e = { buttonType = T_BNET, id = SECRET }
+            elseif r < 0.08 then e = { buttonType = T_BNET, id = nil }
+            elseif r < 0.15 then e = { buttonType = T_WOW, id = i }
+            elseif r < 0.17 then e = "not-a-table"
+            else e = { buttonType = T_BNET, id = i } end
+            list[#list + 1] = e
+            if random() < 0.15 then list[#list + 1] = { buttonType = T_DIVIDER } end
+        end
+        if random() < 0.2 then table.insert(list, 1, { buttonType = T_DIVIDER }) end
+        return list
+    end
+
+    -- Recorded reference: the unfixed applyClassic decisions for one pass on a fresh provider.
+    local function referenceClassic(UI, list, friends, store, query, gameEnabled)
+        local function readChecked(key)
+            local v = store[key]
+            if type(v) == "boolean" then return v end
+            if key == "@apps" and store["App:nil"] == false and store["BSAp:nil"] == false then return false end
+            return true
+        end
+        local offlineChecked = type(store["@offline"]) ~= "boolean" or store["@offline"]
+        local function readGameInfo(info)
+            if type(info) ~= "table" or isSecret(info) then return nil end
+            if isSecret(info.isOnline) or isSecret(info.clientProgram) or isSecret(info.wowProjectID) then return nil end
+            return { isOnline = info.isOnline, clientProgram = info.clientProgram, wowProjectID = info.wowProjectID }
+        end
+        local function gameHides(id)
+            if type(id) ~= "number" then return false end
+            local f = friends[id]
+            local account = f and f.account
+            if type(account) ~= "table" then return false end
+            local primary = readGameInfo(account.gameAccountInfo)
+            if not primary or type(primary.isOnline) ~= "boolean" then return false end
+            if isSecret(f.count) then return false end
+            local gameInfos = {}
+            if type(f.count) == "number" then
+                for j = 1, f.count do
+                    local info = f.games[j]
+                    if info ~= nil then
+                        local copy = readGameInfo(info)
+                        if not copy then return false end
+                        gameInfos[#gameInfos + 1] = copy
+                    end
+                end
+            end
+            local isOnline, keys = UI.FriendState({ gameAccountInfo = primary }, gameInfos)
+            return UI.ShouldHideBnetElement(true, isOnline, keys, readChecked, offlineChecked)
+        end
+        local function names(id)
+            local out = {}
+            local function add(v)
+                if v ~= nil and not isSecret(v) and type(v) == "string" and v ~= "" then out[#out + 1] = v end
+            end
+            local f = friends[id]
+            if type(f.account) == "table" then add(f.account.accountName); add(f.account.battleTag) end
+            if type(f.count) == "number" then
+                for j = 1, f.count do
+                    local info = f.games[j]
+                    if type(info) == "table" then add(info.characterName); add(info.realmName); add(info.richPresence) end
+                end
+            end
+            return out
+        end
+        local q = UI.NameQuery(query)
+        local nameHidden
+        if q ~= "" then
+            nameHidden = {}
+            for _, e in ipairs(list) do
+                if type(e) == "table" and e.buttonType == T_BNET and type(e.id) == "number" then
+                    nameHidden[e.id] = UI.NameFilterHides(q, names(e.id))
+                end
+            end
+        end
+        local function shouldHide(e)
+            if type(e) ~= "table" then return false end
+            if e.buttonType == T_BNET then
+                if gameEnabled ~= false and gameHides(e.id) then return true end
+                if nameHidden ~= nil then
+                    if type(e.id) ~= "number" then return true end
+                    return nameHidden[e.id] ~= false
+                end
+                return false
+            end
+            if e.buttonType == T_WOW then return nameHidden ~= nil end
+            return false
+        end
+        local function isDivider(e) return type(e) == "table" and e.buttonType == T_DIVIDER end
+        return (UI.FilterElements(list, shouldHide, isDivider))
+    end
+
+    -- Flat DataProvider on the shared scrollModel, with edit counters.
+    local function countingProvider(m, list)
+        local p = { collection = {}, flushes = 0, inserts = 0 }
+        for i, e in ipairs(list) do p.collection[i] = e end
+        function p:GetCollection() return self.collection end
+        function p:GetSize() return #self.collection end
+        function p:Flush() self.flushes = self.flushes + 1; self.collection = {}; m.fullUpdate() end
+        function p:InsertTable(t)
+            self.inserts = self.inserts + 1
+            for _, e in ipairs(t) do self.collection[#self.collection + 1] = e end
+            m.fullUpdate()
+        end
+        return p
+    end
+
+    local function withFilter(m, friends, store, query, bnet, body)
+        FRIENDS_BUTTON_TYPE_DIVIDER, FRIENDS_BUTTON_TYPE_WOW, FRIENDS_BUTTON_TYPE_BNET = T_DIVIDER, T_WOW, T_BNET
+        issecretvalue = function(v) return v == SECRET end
+        local printed = {}
+        print = function(...) printed[#printed + 1] = table.concat({ ... }, " ") end
+        C_BattleNet = bnet or {
+            GetFriendAccountInfo = function(i) return friends[i].account end,
+            GetFriendNumGameAccounts = function(i) return friends[i].count end,
+            GetFriendGameAccountInfo = function(i, j) return friends[i].games[j] end,
+        }
+        local env = {
+            hooksecurefunc = function(target, method, fn)
+                assert(target == m and method == "SetDataProvider", "unexpected hook target")
+                m.hooks[#m.hooks + 1] = fn
+            end,
+            FriendsListFrame = { ScrollBox = m, IsShown = function() return true end },
+        }
+        local Filter, ns, restore = loadFilter(env)
+        ns.db = { checkedGames = store }
+        ns.UI.SetNameText(query)
+        Filter.Install()
+        local ok, err = pcall(body, Filter, ns, printed)
+        restore()
+        for _, n in ipairs(globalNames) do _G[n] = savedGlobals[n] end
+        return ok, err
+    end
+
+    local function idsOf(list)
+        local out = {}
+        for i, e in ipairs(list) do
+            out[i] = type(e) == "table" and (tostring(e.buttonType) .. ":" .. tostring(e.id)) or tostring(e)
+        end
+        return table.concat(out, ",")
+    end
+    local function sameElements(a, b)
+        if #a ~= #b then return false end
+        for i = 1, #a do if a[i] ~= b[i] then return false end end
+        return true
+    end
+    local function dividerProblem(list)
+        local function isDiv(e) return type(e) == "table" and e.buttonType == T_DIVIDER end
+        for i, e in ipairs(list) do
+            if isDiv(e) and (i == 1 or i == #list or isDiv(list[i + 1])) then
+                return "divider without friends at position " .. i
+            end
+        end
+        return nil
+    end
+
+    local function genSetup()
+        local n = random(1, 40)
+        local friends = {}
+        for i = 1, n do friends[i] = genFriend() end
+        local list = genList(n)
+        local m = scrollModel(random(16, 40), random(1, 600))
+        m.countRows = function() return m.provider and #m.provider.collection or 0 end
+        local fullRange = math.max(0, #list * m.rowHeight - m.visible)
+        local offset = 0
+        if random() < 0.5 and fullRange > 0 then offset = random(1, fullRange) end
+        return { n = n, friends = friends, list = list, m = m, offset = offset,
+                 store = genChecked(), query = genQuery() }
+    end
+
+    local scenarios = {}
+
+    -- Random refresh with retain = true. Bug-condition inputs only get the contents check.
+    scenarios.refresh = function()
+        local s = genSetup()
+        local m, result = s.m, nil
+        local ok, err = withFilter(m, s.friends, s.store, s.query, nil, function(_, ns)
+            local want = referenceClassic(ns.UI, s.list, s.friends, s.store, s.query, true)
+            local nothingHidden = sameElements(want, s.list)
+            m.offset = s.offset
+            local p = countingProvider(m, s.list)
+            m:SetDataProvider(p, true)
+            local got = p:GetCollection()
+            if not sameElements(got, want) then
+                result = "contents: got " .. idsOf(got) .. " expected " .. idsOf(want); return
+            end
+            if not nothingHidden then
+                local d = dividerProblem(got)
+                if d then result = d .. " in " .. idsOf(got); return end
+            end
+            if nothingHidden then
+                if p.flushes ~= 0 or p.inserts ~= 0 or #m.calls ~= 0 or m.offset ~= s.offset then
+                    result = string.format("nothing hidden: %d flushes, %d inserts, calls [%s], offset %s -> %s",
+                        p.flushes, p.inserts, table.concat(m.calls, ","), tostring(s.offset), tostring(m.offset))
+                end
+            elseif s.offset == 0 then
+                local scrolled = false
+                for _, c in ipairs(m.calls) do if c == "SetScrollPercentage" then scrolled = true end end
+                if p.flushes ~= 1 or p.inserts ~= 1 or m.offset ~= 0 or scrolled then
+                    result = string.format("offset 0, hidden: %d flushes, %d inserts, calls [%s], final offset %s",
+                        p.flushes, p.inserts, table.concat(m.calls, ","), tostring(m.offset))
+                end
+            end
+        end)
+        if not ok then return "refresh raised " .. tostring(err) end
+        return result
+    end
+
+    -- Blizzard SetDataProvider(p, false): already at 0 when our post-hook runs, stays at 0.
+    scenarios.no_retain = function()
+        local s = genSetup()
+        local m, result = s.m, nil
+        local ok, err = withFilter(m, s.friends, s.store, s.query, nil, function(_, ns)
+            local want = referenceClassic(ns.UI, s.list, s.friends, s.store, s.query, true)
+            local ours = m.hooks[1]
+            local atHook
+            m.hooks[1] = function(...) atHook = m.offset; return ours(...) end
+            local fullRange = math.max(0, #s.list * m.rowHeight - m.visible)
+            m.offset = fullRange > 0 and random(1, fullRange) or 0
+            local p = countingProvider(m, s.list)
+            m:SetDataProvider(p, false)
+            if atHook ~= 0 or m.offset ~= 0 then
+                result = string.format("retain false: offset %s at the post-hook, final %s", tostring(atHook), tostring(m.offset))
+            elseif not sameElements(p:GetCollection(), want) then
+                result = "retain false contents: got " .. idsOf(p:GetCollection()) .. " expected " .. idsOf(want)
+            end
+        end)
+        if not ok then return "no_retain raised " .. tostring(err) end
+        return result
+    end
+
+    -- A throwing C_BattleNet latches the guard and prints once.
+    scenarios.error_latch = function()
+        local s = genSetup()
+        local m, result = s.m, nil
+        s.query = ""
+        table.insert(s.list, random(1, #s.list + 1), { buttonType = T_BNET, id = 1 })
+        local bnet
+        if random() < 0.5 then
+            bnet = setmetatable({}, { __index = function() error("C_BattleNet unavailable") end })
+        else
+            bnet = { GetFriendAccountInfo = function() error("boom") end,
+                     GetFriendNumGameAccounts = function() error("boom") end,
+                     GetFriendGameAccountInfo = function() error("boom") end }
+        end
+        local ok, err = withFilter(m, s.friends, s.store, s.query, bnet, function(Filter, _, printed)
+            m.offset = s.offset
+            local p = countingProvider(m, s.list)
+            m:SetDataProvider(p, true)
+            if not Filter.IsDisabled() then result = "guard did not latch"; return end
+            if p.flushes ~= 0 or not sameElements(p:GetCollection(), s.list) then
+                result = "provider edited after the error"; return
+            end
+            for _ = 1, random(1, 3) do m:SetDataProvider(countingProvider(m, s.list), true) end
+            if #printed ~= 1 then result = "printed " .. #printed .. " times, expected once" end
+        end)
+        if not ok then return "error_latch raised " .. tostring(err) end
+        return result
+    end
+
+    local order = { "refresh", "no_retain", "error_latch" }
+    local failed, first = {}, {}
+    for _ = 1, ITERATIONS do
+        for _, name in ipairs(order) do
+            local msg = scenarios[name]()
+            if msg then
+                failed[name] = (failed[name] or 0) + 1
+                first[name] = first[name] or msg
+            end
+        end
+    end
+    local lines = {}
+    for _, name in ipairs(order) do
+        if failed[name] then
+            lines[#lines + 1] = string.format("%s failed %d/%d, first counterexample: %s",
+                name, failed[name], ITERATIONS, first[name])
+        end
+    end
+    assert(#lines == 0, "\n     " .. table.concat(lines, "\n     "))
+end)
+
+----------------------------------------------------------------------
+-- Feature: friends-list-scroll-reset-fix, unit, example, failure-injection and integration tests
+--
+-- Validates: Requirements 2.1, 2.2, 2.3, 3.4, 3.5
+----------------------------------------------------------------------
+local scrollFix = {}
+do
+    local T_DIVIDER, T_WOW, T_BNET = 1, 2, 3
+    local globalNames = {
+        "print", "C_BattleNet", "FRIENDS_BUTTON_TYPE_DIVIDER", "FRIENDS_BUTTON_TYPE_WOW",
+        "FRIENDS_BUTTON_TYPE_BNET", "issecretvalue", "ScrollBoxConstants",
+    }
+    local savedGlobals = {}
+    for _, n in ipairs(globalNames) do savedGlobals[n] = _G[n] end
+    local EPS = 1e-6
+    scrollFix.T_BNET = T_BNET
+
+    -- friends[i] = list of game infos. D3 players are hidden when D3 is unchecked.
+    function scrollFix.d3() return { { isOnline = true, clientProgram = "D3" } } end
+    function scrollFix.wow() return { { isOnline = true, clientProgram = "WoW", wowProjectID = 1 } } end
+
+    -- kind is "classic" or "social". body(Filter, ns, printed). Returns ok, err.
+    function scrollFix.withFilter(kind, m, friends, body)
+        FRIENDS_BUTTON_TYPE_DIVIDER, FRIENDS_BUTTON_TYPE_WOW, FRIENDS_BUTTON_TYPE_BNET = T_DIVIDER, T_WOW, T_BNET
+        issecretvalue = function() return false end
+        local printed = {}
+        print = function(...) printed[#printed + 1] = table.concat({ ... }, " ") end
+        C_BattleNet = {
+            GetFriendAccountInfo = function(i) return { gameAccountInfo = friends[i][1] } end,
+            GetFriendNumGameAccounts = function(i) return #friends[i] end,
+            GetFriendGameAccountInfo = function(i, j) return friends[i][j] end,
+        }
+        local env = {
+            hooksecurefunc = function(target, method, fn)
+                assert(target == m and method == "SetDataProvider", "unexpected hook target")
+                m.hooks[#m.hooks + 1] = fn
+            end,
+        }
+        local frame = { ScrollBox = m, IsShown = function() return true end }
+        if kind == "classic" then env.FriendsListFrame = frame
+        else env.SocialUIFrame = { FriendsList = frame } end
+        local Filter, ns, restore = loadFilter(env)
+        ns.db = { checkedGames = {} }
+        Filter.Install()
+        local ok, err = pcall(body, Filter, ns, printed)
+        restore()
+        for _, n in ipairs(globalNames) do _G[n] = savedGlobals[n] end
+        return ok, err
+    end
+
+    function scrollFix.newNode(m, data)
+        local node = { data = data, children = {} }
+        function node:GetData() return self.data end
+        function node:GetNodes() return self.children end
+        function node:Remove(child, skipInvalidation)
+            for i, c in ipairs(self.children) do
+                if c == child then table.remove(self.children, i); break end
+            end
+            if not skipInvalidation then m.fullUpdate() end
+        end
+        function node:InsertNode(child, index)
+            table.insert(self.children, index, child)
+            m.fullUpdate()
+        end
+        return node
+    end
+
+    -- Tree provider: rows are every node below the root.
+    function scrollFix.treeProvider(m, root)
+        local p = { invalidations = 0 }
+        function p:GetRootNode() return root end
+        function p:Invalidate() self.invalidations = self.invalidations + 1; m.fullUpdate() end
+        m.countRows = function()
+            local n = 0
+            for _, node in ipairs(root:GetNodes()) do n = n + 1 + #node:GetNodes() end
+            return n
+        end
+        return p
+    end
+
+    function scrollFix.ids(list)
+        local out = {}
+        for i, e in ipairs(list) do out[i] = tostring(e.id) end
+        return table.concat(out, ",")
+    end
+
+    function scrollFix.near(a, b) return math.abs(a - b) <= EPS end
+end
+
+-- Unit tests: captureScroll and restoreScroll.
+property("Feature: friends-list-scroll-reset-fix, Unit: captureScroll and restoreScroll edge cases", function()
+    local Filter, _, restore = loadFilter({})
+    local savedConstants = ScrollBoxConstants
+    local ok, err = pcall(function()
+        local capture, restoreScroll = Filter.captureScroll, Filter.restoreScroll
+        assert(type(capture) == "function" and type(restoreScroll) == "function", "helpers not exposed")
+
+        -- captureScroll: nothing to capture.
+        assert(capture(nil) == nil, "nil ScrollBox")
+        assert(capture("box") == nil, "non-table ScrollBox")
+        assert(capture({}) == nil, "ScrollBox without the method")
+        assert(capture({ GetDerivedScrollOffset = 5 }) == nil, "non-function method")
+        local function box(ret) return { GetDerivedScrollOffset = function() return ret end } end
+        assert(capture(box("12")) == nil, "string return")
+        assert(capture(box({})) == nil, "table return")
+        assert(capture(box(true)) == nil, "boolean return")
+        assert(capture(box(nil)) == nil, "nil return")
+        assert(capture(box(0)) == nil, "zero offset")
+        assert(capture(box(-4)) == nil, "negative offset")
+        assert(capture({ GetDerivedScrollOffset = function() error("boom") end }) == nil, "raising getter")
+        assert(capture(box(37.5)) == 37.5, "valid offset")
+
+        -- restoreScroll helpers.
+        local function recorder(range)
+            local r = { calls = {} }
+            r.GetDerivedScrollRange = function() return range end
+            r.SetScrollPercentage = function(_, pct, noInterp) r.calls[#r.calls + 1] = { pct, noInterp } end
+            return r
+        end
+        ScrollBoxConstants = nil
+        restoreScroll(nil, 10)
+        restoreScroll("box", 10)
+        restoreScroll({}, 10) -- missing methods: swallowed
+        restoreScroll({ GetDerivedScrollRange = function() return 100 end }, 10) -- no setter
+        local r = recorder(100)
+        restoreScroll(r, nil); restoreScroll(r, "10"); restoreScroll(r, {})
+        assert(#r.calls == 0, "restored without a numeric offset")
+
+        for _, bad in ipairs({ "100", true, {} }) do
+            r = recorder(bad)
+            restoreScroll(r, 10)
+            assert(#r.calls == 0, "restored with non-number range " .. tostring(bad))
+        end
+        r = recorder(nil); restoreScroll(r, 10)
+        assert(#r.calls == 0, "restored with nil range")
+        r = recorder(0); restoreScroll(r, 10)
+        assert(#r.calls == 0, "restored with zero range")
+        r = recorder(-5); restoreScroll(r, 10)
+        assert(#r.calls == 0, "restored with negative range")
+
+        r = recorder(200); restoreScroll(r, 50)
+        assert(#r.calls == 1 and scrollFix.near(r.calls[1][1], 0.25), "wrong percentage for offset below range")
+        assert(r.calls[1][2] == true, "interpolation flag should fall back to true")
+        r = recorder(200); restoreScroll(r, 500)
+        assert(#r.calls == 1 and r.calls[1][1] == 1, "offset above range must clamp to 1")
+
+        ScrollBoxConstants = { NoScrollInterpolation = "noInterp" }
+        r = recorder(200); restoreScroll(r, 100)
+        assert(r.calls[1][2] == "noInterp", "ScrollBoxConstants value not used")
+
+        -- Errors are swallowed.
+        restoreScroll({ GetDerivedScrollRange = function() error("boom") end,
+                        SetScrollPercentage = function() end }, 10)
+        restoreScroll({ GetDerivedScrollRange = function() return 100 end,
+                        SetScrollPercentage = function() error("boom") end }, 10)
+    end)
+    ScrollBoxConstants = savedConstants
+    restore()
+    if not ok then error(err, 0) end
+end)
+
+-- Example: a social tree with two headers loses one friend and keeps its offset.
+property("Feature: friends-list-scroll-reset-fix, Example: social tree with two headers keeps its offset", function()
+    local m = scrollModel(20, 40)
+    local friends = {
+        scrollFix.wow(), scrollFix.d3(), scrollFix.wow(), -- header 1: friend 2 is hidden
+        scrollFix.wow(), scrollFix.wow(), scrollFix.wow(), -- header 2
+    }
+    local ok, err = scrollFix.withFilter("social", m, friends, function(_, ns)
+        ns.db.checkedGames[ns.UI.GameKey("D3")] = false
+        local root = scrollFix.newNode(m, nil)
+        local headers = {}
+        for h = 1, 2 do
+            headers[h] = scrollFix.newNode(m, { headerText = "H" .. h })
+            root.children[h] = headers[h]
+        end
+        for i = 1, 6 do
+            local header = headers[i <= 3 and 1 or 2]
+            header.children[#header.children + 1] = scrollFix.newNode(m, { friendIndex = i })
+        end
+        local function childIds(header)
+            local out = {}
+            for i, n in ipairs(header.children) do out[i] = tostring(n:GetData().friendIndex) end
+            return table.concat(out, ",")
+        end
+        local p = scrollFix.treeProvider(m, root)
+        assert(m.countRows() == 8, "unexpected row count")
+        m.offset = 60 -- range is 8 * 20 - 40 = 120 before, 100 after
+        m:SetDataProvider(p, true)
+        assert(childIds(headers[1]) == "1,3", "header 1 wrong: " .. childIds(headers[1]))
+        assert(childIds(headers[2]) == "4,5,6", "header 2 wrong: " .. childIds(headers[2]))
+        assert(p.invalidations == 1, "expected one Invalidate, got " .. p.invalidations)
+        assert(m.offset == 60, "offset changed to " .. tostring(m.offset))
+        for _, c in ipairs(m.calls) do
+            assert(c ~= "ScrollToBegin", "ScrollToBegin called")
+        end
+    end)
+    if not ok then error(err, 0) end
+end)
+
+-- Failure injection: random ScrollBox method failures never change the list nor latch the guard.
+property("Feature: friends-list-scroll-reset-fix, Failure injection: ScrollBox failures never affect filtering", function()
+    local METHODS = { "GetDerivedScrollOffset", "GetDerivedScrollRange", "SetScrollPercentage" }
+    local MODES = { "ok", "raise", "junk", "nilret" }
+
+    -- Proxy that receives the post-hook call in place of the model, with random faults.
+    local function faultyProxy(m, modes)
+        local proxy = {}
+        for _, name in ipairs(METHODS) do
+            local real = m[name]
+            proxy[name] = function(_, ...)
+                local mode = modes[name]
+                if mode == "raise" then error("injected failure in " .. name) end
+                if mode == "junk" then return "junk" end
+                if mode == "nilret" then return nil end
+                return real(m, ...)
+            end
+        end
+        return proxy
+    end
+
+    for iter = 1, ITERATIONS do
+        local social = random() < 0.5
+        local n = random(2, 40)
+        local rowHeight, visible = random(16, 40), random(1, 200)
+        local m = scrollModel(rowHeight, visible)
+        local friends, hidden = {}, {}
+        for i = 1, n do
+            if random() < 0.4 then friends[i] = scrollFix.d3(); hidden[i] = true else friends[i] = scrollFix.wow() end
+        end
+        local modes = {}
+        local anyFault = false
+        for _, name in ipairs(METHODS) do
+            modes[name] = MODES[random(#MODES)]
+            if modes[name] ~= "ok" then anyFault = true end
+        end
+        if not anyFault then modes[METHODS[random(#METHODS)]] = "raise" end
+        local want, got
+        local ok, err = scrollFix.withFilter(social and "social" or "classic", m, friends, function(Filter, ns, printed)
+            ns.db.checkedGames[ns.UI.GameKey("D3")] = false
+            local ours = m.hooks[1]
+            m.hooks[1] = function(_, p, retain) return ours(faultyProxy(m, modes), p, retain) end
+            local wantIds = {}
+            for i = 1, n do if not hidden[i] then wantIds[#wantIds + 1] = tostring(i) end end
+            want = table.concat(wantIds, ",")
+            if social then
+                local root = scrollFix.newNode(m, nil)
+                local header = scrollFix.newNode(m, { headerText = "H" })
+                root.children[1] = header
+                for i = 1, n do header.children[i] = scrollFix.newNode(m, { friendIndex = i }) end
+                local p = scrollFix.treeProvider(m, root)
+                m.offset = random(1, math.max(1, m.countRows() * rowHeight - visible))
+                m:SetDataProvider(p, true)
+                local out = {}
+                for i, node in ipairs(header.children) do out[i] = tostring(node:GetData().friendIndex) end
+                got = table.concat(out, ",")
+            else
+                local list = {}
+                for i = 1, n do list[i] = { buttonType = scrollFix.T_BNET, id = i } end
+                m.countRows = function() return m.provider and #m.provider.collection or 0 end
+                m.offset = random(1, math.max(1, n * rowHeight - visible))
+                local p = classicProvider(m, list)
+                m:SetDataProvider(p, true)
+                got = scrollFix.ids(p:GetCollection())
+            end
+            assert(not Filter.IsDisabled(), "guard latched")
+            assert(#printed == 0, "message printed: " .. tostring(printed[1]))
+        end)
+        if not ok then
+            error(string.format("iteration %d (%s, modes %s/%s/%s): %s", iter, social and "social" or "classic",
+                modes[METHODS[1]], modes[METHODS[2]], modes[METHODS[3]], tostring(err)), 0)
+        end
+        assert(got == want, string.format("iteration %d provider contents: got %s expected %s", iter, got, want))
+    end
+end)
+
+-- Integration: repeated retained refreshes keep the offset, retain = false lands at 0.
+property("Feature: friends-list-scroll-reset-fix, Integration: refresh cycle keeps and resets the offset", function()
+    for iter = 1, ITERATIONS do
+        local n = random(30, 60)
+        local rowHeight, visible = random(16, 40), random(50, 200)
+        local m = scrollModel(rowHeight, visible)
+        m.countRows = function() return m.provider and #m.provider.collection or 0 end
+        local friends = {}
+        for i = 1, n do friends[i] = scrollFix.wow() end
+        local ok, err = scrollFix.withFilter("classic", m, friends, function(_, ns)
+            ns.db.checkedGames[ns.UI.GameKey("D3")] = false
+            local function refresh(retain)
+                -- Friend data changes: up to a third of the friends are D3 players this time.
+                local hidden = {}
+                for i = 1, n do
+                    local hide = random() < 0.3 and #hidden < math.floor(n * 0.5)
+                    friends[i] = hide and scrollFix.d3() or scrollFix.wow()
+                    if hide then hidden[#hidden + 1] = i end
+                end
+                local list = {}
+                for i = 1, n do list[i] = { buttonType = scrollFix.T_BNET, id = i } end
+                local p = classicProvider(m, list)
+                m:SetDataProvider(p, retain)
+                assert(#p:GetCollection() == n - #hidden, "wrong number of friends kept")
+                return p
+            end
+            -- At most half of the rows are hidden; the range must still exceed the wanted offset.
+            local keepRows = n - math.floor(n * 0.5)
+            local minRange = keepRows * rowHeight - visible
+            if minRange < 2 then return end
+            local target = random(1, math.floor(minRange))
+            m.offset = target
+            for round = 1, 5 do
+                refresh(true)
+                assert(scrollFix.near(m.offset, target), string.format(
+                    "round %d: offset %.3f, expected %.3f", round, m.offset, target))
+            end
+            refresh(false)
+            assert(m.offset == 0, "SetDataProvider(p, false) did not land at 0: " .. tostring(m.offset))
+            local target2 = random(1, math.floor(minRange))
+            m.offset = target2
+            for round = 1, 3 do
+                refresh(true)
+                assert(scrollFix.near(m.offset, target2), string.format(
+                    "after reset, round %d: offset %.3f, expected %.3f", round, m.offset, target2))
+            end
+        end)
+        if not ok then error("iteration " .. iter .. ": " .. tostring(err), 0) end
+    end
 end)
 
 print(string.format("%d/%d properties passed", total - failures, total))

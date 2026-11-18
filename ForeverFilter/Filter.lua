@@ -271,7 +271,38 @@ local function classicIsDivider(e)
     return type(e) == "table" and e.buttonType == FRIENDS_BUTTON_TYPE_DIVIDER
 end
 
-local function applyClassic(_, provider, gameEnabled)
+-- Scroll offset in pixels, or nil when at the top or unreadable.
+-- Errors are swallowed so a scroll problem never reaches the error latch.
+local function captureScroll(scrollBox)
+    if type(scrollBox) ~= "table" or type(scrollBox.GetDerivedScrollOffset) ~= "function" then
+        return nil
+    end
+    local ok, offset = pcall(scrollBox.GetDerivedScrollOffset, scrollBox)
+    if ok and type(offset) == "number" and offset > 0 then
+        return offset
+    end
+    return nil
+end
+
+-- Puts a captured offset back, clamped to the current scroll range.
+local function restoreScroll(scrollBox, offset)
+    if type(offset) ~= "number" or type(scrollBox) ~= "table" then
+        return
+    end
+    pcall(function()
+        local range = scrollBox:GetDerivedScrollRange()
+        if type(range) == "number" and range > 0 then
+            local noInterp = ScrollBoxConstants and ScrollBoxConstants.NoScrollInterpolation or true
+            scrollBox:SetScrollPercentage(math.min(1, offset / range), noInterp)
+        end
+    end)
+end
+
+-- Exposed for tests.
+Filter.captureScroll = captureScroll
+Filter.restoreScroll = restoreScroll
+
+local function applyClassic(scrollBox, provider, gameEnabled)
     if type(provider) ~= "table" or type(provider.GetCollection) ~= "function" then
         return
     end
@@ -323,9 +354,11 @@ local function applyClassic(_, provider, gameEnabled)
     if sameList(kept, current) then
         return
     end
+    local offset = captureScroll(scrollBox)
     provider:Flush()
     provider:InsertTable(kept)
     snap.sizeAfterEdit = provider:GetSize()
+    restoreScroll(scrollBox, offset)
 end
 
 Filter.SetApplier("classic", applyClassic)
@@ -372,7 +405,7 @@ local function isNonBnetFriendNode(_)
 end
 Filter.isNonBnetFriendNode = isNonBnetFriendNode
 
-local function applySocial(_, provider, gameEnabled)
+local function applySocial(scrollBox, provider, gameEnabled)
     if type(provider) ~= "table" or type(provider.GetRootNode) ~= "function"
         or type(provider.Invalidate) ~= "function" then
         return
@@ -435,11 +468,14 @@ local function applySocial(_, provider, gameEnabled)
     end
 
     local removedAny = false
+    local changedAny = false
+    local offset = captureScroll(scrollBox)
     for _, entry in ipairs(snap.headers) do
         local header = entry.header
         local kept = ns.UI.FilterElements(entry.nodes, shouldHide, noDivider)
         local current = header:GetNodes()
         if not sameList(kept, current) then
+            changedAny = true
             local keptSet = {}
             for _, node in ipairs(kept) do
                 keptSet[node] = true
@@ -464,6 +500,9 @@ local function applySocial(_, provider, gameEnabled)
         provider:Invalidate()
     end
     snap.sizeAfterEdit = totalChildren(headers)
+    if changedAny then
+        restoreScroll(scrollBox, offset)
+    end
 end
 
 Filter.SetApplier("social", applySocial)
