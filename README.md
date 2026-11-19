@@ -1,6 +1,6 @@
 # Forever Filter
 
-A World of Warcraft addon that groups your Battle.net friends by the game they are playing, so you can see at a glance who is on which game or WoW version.
+A retail World of Warcraft addon that groups your Battle.net friends by the game they are playing, so you can see at a glance who is on which game or WoW version.
 
 ## Features
 
@@ -14,27 +14,18 @@ A World of Warcraft addon that groups your Battle.net friends by the game they a
 2. Copy the `ForeverFilter` folder into `World of Warcraft\_retail_\Interface\AddOns\`.
 3. Start the game, or type `/reload` if it is already running.
 
-On Windows you can run `deploy.cmd` to copy the folder into a default WoW install for you.
-
 ## Usage
 
 | Command | Action |
 | --- | --- |
 | `/ff` or `/foreverfilter` | Open or close the window |
 | `/ff debug` | Toggle debug output, which adds project IDs to the game rows |
+| `/ff log` | Print the filter's session log, for bug reports |
 
 ## Saved data
 
 Settings are stored in the `ForeverFilterDB` saved variable.
 
-## Tests
-
-Property tests for the checkbox state logic are in `tests/ui_checks_test.lua`. They need a standalone Lua 5.1 or later interpreter. Run this from the repository root:
-
-```
-lua tests/ui_checks_test.lua
-```
-
 ## License
 
-See [LICENSE](LICENSE).
+Forever Filter is released under the MIT License. See the [LICENSE](https://github.com/druman55/WoWForeverFilter/blob/main/LICENSE) file for the full text.

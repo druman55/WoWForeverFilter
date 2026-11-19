@@ -36,6 +36,14 @@ SlashCmdList["FOREVERFILTER"] = function(msg)
         end
         return
     end
+    if cmd == "log" then
+        local lines = ns.Filter and ns.Filter.GetLog and ns.Filter.GetLog() or {}
+        print("Forever Filter log (" .. #lines .. " lines):")
+        for _, line in ipairs(lines) do
+            print("  " .. line)
+        end
+        return
+    end
     if cmd == "minimap" then
         if ns.Icons and ns.Icons.ToggleMinimap then
             ns.Icons.ToggleMinimap()

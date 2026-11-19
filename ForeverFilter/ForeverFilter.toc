@@ -4,6 +4,8 @@
 ## Author: druma
 ## Version: @project-version@
 ## Category: User Interface
+# Retail only. WoW Forever (camelot) blocks the friends list refresh after an add-on edits it.
+## AllowLoadGameType: mainline
 ## IconTexture: Interface\AddOns\ForeverFilter\Textures\ForeverFilter_64
 ## SavedVariables: ForeverFilterDB
 ## X-Curse-Project-ID: 1810309

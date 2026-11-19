@@ -1,13 +1,20 @@
 # Forever Filter
 
+## v1.1.2
+
+- **Retail only.** Forever Filter no longer loads in WoW Forever. Forever's friends list blocks its own refresh after an addon filters it, which caused an "action blocked" message and turned filtering off. Filtering in retail is unchanged.
+- **New `/ff log` command.** Prints a short log of what the filter did this session, to help with bug reports.
+
 ## v1.1.1
 
 - **Fixed: Friends List jumping to the top.** The Friends List no longer scrolls back to the top every few seconds when friends update. It also keeps your place when you change a game checkbox, the Offline option or the name filter. If the list gets shorter, it stops at the new bottom.
+
 ## v1.1.0
 
 - **Separate name filter:** The name box is now its own small window above the Friends List, with a "Filter Friends" placeholder. The games window holds only the options and the games list.
 - **Always Show Name Filter option:** New checkbox in the options, on by default. When on, the name filter shows whenever the Friends List is open. When off, it shows only while the games window is open.
 - **Remembers your choice:** Whether the games window opens with the Friends List now follows your last choice, whether you used the Friends List icon button, the window's close button, `/ff` or the minimap button.
+
 ## v1.0.2
 
 - **Wago:** Releases are now also published to Wago Addons.

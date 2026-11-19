@@ -43,5 +43,28 @@ The workflow in `.github/workflows/release.yml` builds the zip and uploads it.
 - CurseForge project ID: 1810309 (already set in `ForeverFilter.toc`).
 - Wago project ID: nKWwMoKE (set in `ForeverFilter.toc`). The `WAGO_API_TOKEN` GitHub secret is set.
 - Store text for the project pages is in `description.md`. The logo is `resources/icon/PNG/ForeverFilter_256.png`. Both are uploaded by hand on each site.
-- `deploy.cmd` copies the addon into a local WoW install and fills in the version from `CHANGELOG.md`.
 
+## Development
+
+### Local deploy
+
+On Windows, run `deploy.cmd` from the repository root to copy the `ForeverFilter` folder into your local retail install. It also fills in `@project-version@` in the deployed `.toc` with the newest version in `CHANGELOG.md`.
+
+- `deploy.cmd -Flavor forever` or `-Flavor all` deploys to other installs under the default WoW folder.
+- `deploy.cmd -AddOnsPath <path>`, or the `WOW_ADDONS_PATH` environment variable, deploys to a specific AddOns folder.
+
+### Tests
+
+Property tests are in `tests/ui_checks_test.lua`. They need a standalone Lua 5.1 or later interpreter. Run this from the repository root:
+
+```
+lua tests/ui_checks_test.lua
+```
+
+### Retail only
+
+The `.toc` has `## AllowLoadGameType: mainline`, so the addon does not load in WoW Forever. Forever's SocialUI friends list rebuilds itself with a protected call (`C_BattleNet.SearchFriends`), which is blocked once an addon has edited the list. Filtering only works on the classic Friends List.
+
+### Documentation rule
+
+`README.md` is shown to players on CurseForge and Wago, so it only covers features, installation, usage, saved data and the license. Developer details, such as deploying, tests and release steps, go in this file.

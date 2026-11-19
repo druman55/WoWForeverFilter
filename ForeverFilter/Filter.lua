@@ -22,6 +22,25 @@ local appliers = {}
 
 Filter.snapshots = snapshots
 
+-- Diagnostic log for the session, never saved. /ff log prints it; with /ff debug
+-- on, each line is also printed as it happens.
+local LOG_MAX = 80
+local logLines = {}
+local function log(msg)
+    local t = (type(GetTime) == "function") and GetTime() or 0
+    logLines[#logLines + 1] = string.format("%.1f %s", t, tostring(msg))
+    if #logLines > LOG_MAX then
+        table.remove(logLines, 1)
+    end
+    if ns.debug and type(print) == "function" then
+        print("|cffff9900FF log|r " .. tostring(msg))
+    end
+end
+Filter.log = log
+function Filter.GetLog()
+    return logLines
+end
+
 local function announce()
     if type(print) == "function" then
         print(ANNOUNCE_TEXT)
@@ -56,8 +75,10 @@ local function run(kind, scrollBox, provider)
             return
         end
     end
-    local ok = pcall(apply, scrollBox, provider, not guard.disabled)
+    log(string.format("run %s: gameEnabled=%s", kind, tostring(not guard.disabled)))
+    local ok, err = pcall(apply, scrollBox, provider, not guard.disabled)
     if not ok then
+        log("ERROR in " .. kind .. ": " .. tostring(err))
         feedGuard("error")
     end
 end
@@ -88,6 +109,7 @@ local function installOne(kind, scrollBox)
         return
     end
     hooked[scrollBox] = kind
+    log("hooked SetDataProvider on " .. kind .. " list")
     hooksecurefunc(scrollBox, "SetDataProvider", function(self, provider)
         run(kind, self, provider)
     end)
@@ -351,6 +373,8 @@ local function applyClassic(scrollBox, provider, gameEnabled)
     end
 
     local kept = ns.UI.FilterElements(snap.elements, shouldHide, classicIsDivider)
+    log(string.format("classic: %d elements, %d kept, name query %s", #snap.elements, #kept,
+        nameHidden and "active" or "empty"))
     if sameList(kept, current) then
         return
     end
@@ -562,7 +586,8 @@ if type(CreateFrame) == "function" then
     local blockedFrame = CreateFrame("Frame")
     blockedFrame:RegisterEvent("ADDON_ACTION_BLOCKED")
     blockedFrame:RegisterEvent("ADDON_ACTION_FORBIDDEN")
-    blockedFrame:SetScript("OnEvent", function(_, _, addonName)
+    blockedFrame:SetScript("OnEvent", function(_, event, addonName, funcName)
+        log(string.format("%s addon=%s func=%s", tostring(event), tostring(addonName), tostring(funcName)))
         if addonName == ADDON_NAME then
             feedGuard("blocked")
         end
